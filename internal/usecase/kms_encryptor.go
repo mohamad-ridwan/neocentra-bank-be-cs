@@ -6,6 +6,9 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
+	"log"
+	"sync"
+	"time"
 
 	"github.com/tink-crypto/tink-go/v2/aead"
 	subtle "github.com/tink-crypto/tink-go/v2/aead/subtle"
@@ -21,6 +24,7 @@ type KMSRepository interface {
 }
 
 type LocalKMSService struct {
+	mu        sync.RWMutex
 	masterKEK []byte         // 32-byte key dari ENV (LOCAL_KMS_MASTER_KEY)
 	handle    *keyset.Handle // Current Tink Keyset Handle
 	aead      tink.AEAD      // AEAD Primitive untuk Encrypt/Decrypt
@@ -76,9 +80,11 @@ func (s *LocalKMSService) loadOrCreateKeyset(ctx context.Context, keyName string
 			return fmt.Errorf("failed to create AEAD primitive from keyset handle: %w", err)
 		}
 
+		s.mu.Lock()
 		s.handle = kh
 		s.aead = primitive
 		s.version = 1
+		s.mu.Unlock()
 		return nil
 	}
 
@@ -94,15 +100,21 @@ func (s *LocalKMSService) loadOrCreateKeyset(ctx context.Context, keyName string
 		return fmt.Errorf("failed to create AEAD primitive: %w", err)
 	}
 
+	s.mu.Lock()
 	s.handle = kh
 	s.aead = primitive
 	s.version = version
+	s.mu.Unlock()
 	return nil
 }
 
 // EncryptPII mengenkripsi plaintext (misal NIK) dengan AAD (Associated Authenticated Data)
 func (s *LocalKMSService) EncryptPII(plaintext string, aad string) (string, error) {
-	ciphertext, err := s.aead.Encrypt([]byte(plaintext), []byte(aad))
+	s.mu.RLock()
+	aeadPrimitive := s.aead
+	s.mu.RUnlock()
+
+	ciphertext, err := aeadPrimitive.Encrypt([]byte(plaintext), []byte(aad))
 	if err != nil {
 		return "", fmt.Errorf("failed to encrypt PII: %w", err)
 	}
@@ -116,7 +128,11 @@ func (s *LocalKMSService) DecryptPII(ciphertextBase64 string, aad string) (strin
 		return "", fmt.Errorf("invalid base64 ciphertext: %w", err)
 	}
 
-	plaintext, err := s.aead.Decrypt(ciphertext, []byte(aad))
+	s.mu.RLock()
+	aeadPrimitive := s.aead
+	s.mu.RUnlock()
+
+	plaintext, err := aeadPrimitive.Decrypt(ciphertext, []byte(aad))
 	if err != nil {
 		return "", fmt.Errorf("failed to decrypt PII: %w", err)
 	}
@@ -130,7 +146,12 @@ func (s *LocalKMSService) RotateKey(ctx context.Context, keyName string) error {
 		return fmt.Errorf("failed to create master AEAD primitive: %w", err)
 	}
 
-	mgr := keyset.NewManagerFromHandle(s.handle)
+	s.mu.RLock()
+	currentHandle := s.handle
+	currentVersion := s.version
+	s.mu.RUnlock()
+
+	mgr := keyset.NewManagerFromHandle(currentHandle)
 	newKeyID, err := mgr.Add(aead.AES256GCMKeyTemplate())
 	if err != nil {
 		return fmt.Errorf("failed to add new key for rotation: %w", err)
@@ -152,7 +173,7 @@ func (s *LocalKMSService) RotateKey(ctx context.Context, keyName string) error {
 	}
 
 	primaryKeyID := kh.KeysetInfo().GetPrimaryKeyId()
-	newVersion := s.version + 1
+	newVersion := currentVersion + 1
 	if err := s.repo.UpdateKeyset(ctx, keyName, buf.Bytes(), primaryKeyID, newVersion); err != nil {
 		return fmt.Errorf("failed to update rotated keyset in repository: %w", err)
 	}
@@ -162,8 +183,36 @@ func (s *LocalKMSService) RotateKey(ctx context.Context, keyName string) error {
 		return fmt.Errorf("failed to create AEAD primitive after rotation: %w", err)
 	}
 
+	s.mu.Lock()
 	s.handle = kh
 	s.aead = primitive
 	s.version = newVersion
+	s.mu.Unlock()
 	return nil
+}
+
+// StartRotationWorker menjalankan Goroutine Background Scheduler yang memanfaatkan time.Ticker
+// untuk mengeksekusi rotasi kunci secara otomatis di latar belakang (background thread).
+func (s *LocalKMSService) StartRotationWorker(ctx context.Context, keyName string, interval time.Duration) {
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		log.Printf("[KMS Worker] Started key rotation worker for keyset '%s' with interval %v", keyName, interval)
+
+		for {
+			select {
+			case <-ctx.Done():
+				log.Printf("[KMS Worker] Stopping key rotation worker for keyset '%s'", keyName)
+				return
+			case <-ticker.C:
+				log.Printf("[KMS Worker] Executing automatic key rotation for keyset '%s'...", keyName)
+				if err := s.RotateKey(ctx, keyName); err != nil {
+					log.Printf("[KMS Worker Error] Failed to rotate keyset '%s': %v", keyName, err)
+				} else {
+					log.Printf("[KMS Worker] Successfully rotated keyset '%s' to version %d", keyName, s.version)
+				}
+			}
+		}
+	}()
 }
