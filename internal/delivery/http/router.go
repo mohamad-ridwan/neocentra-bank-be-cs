@@ -3,11 +3,13 @@ package http
 import (
 	"customer-service/internal/delivery/http/handler"
 	"customer-service/internal/delivery/http/middleware"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/redis/go-redis/v9"
 )
 
-func SetupRouter(custHandler *handler.CustomerHandler) *gin.Engine {
+func SetupRouter(custHandler *handler.CustomerHandler, rdb *redis.Client) *gin.Engine {
 	r := gin.New()
 
 	// Global Middlewares
@@ -24,7 +26,7 @@ func SetupRouter(custHandler *handler.CustomerHandler) *gin.Engine {
 	v1 := r.Group("/api/v1")
 	v1.Use(middleware.JWTAuthMiddleware())
 	{
-		v1.POST("/customers/register", custHandler.RegisterCustomer)
+		v1.POST("/customers/register",middleware.IdempotencyMiddleware(rdb, 10*time.Minute), custHandler.RegisterCustomer)
 	}
 
 	return r
