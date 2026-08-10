@@ -1,7 +1,7 @@
 implementasikan micro (microservices) sebagai backend menggunakan golang.
 
 database stack :
-- postgresql
+- postgresql versi 18
 - ACID Transaction (Prepared query)
 
 API Gateway :
@@ -37,7 +37,8 @@ sistem keamanan :
 - Enkripsi Penyimpanan Data (Data at Rest) : 
 1. AES-256 (Advanced Encryption Standard): Standar kriptografi simetris kelas militer yang digunakan untuk mengacak NIK, alamat, dan email sebelum disimpan ke dalam database backend.
 2. Field-Level Encryption (FLE): Enkripsi diterapkan secara spesifik pada level kolom/field data sensitif (bukan sekadar enkripsi disk/database utuh). Jika database terkompromi atau bocor, data NIK tetap berupa ciphertext acak.
-3. Tokenisasi & Masking: NIK dikonversi menjadi token acak non-sensitif untuk pemrosesan operasional harian. Pada tampilan antarmuka staf admin/CS internal, data di-masking (contoh: 3271********0001).
+3. Decrypt Request Body API: Request payload yang dikirim oleh frontend/client untuk field data sensitif (`nik`, `full_name`, `address`, `email`, `phone_number`) wajib di-encrypt dari sisi client dengan model kriptografi simetris yang sama (Google Tink AES256-GCM). Backend akan mendekripsi (*decrypt*) field-field tersebut secara otomatis di UseCase layer menggunakan `DecryptPII` sebelum menjalankan fungsi validasi format (NIK 16 digit, email, no hp) dan cek keunikan di database. Request DTO Payload (Encrypted Body dari Frontend) di file "neocentra-bank-be-cs/internal/dto/register_request_dto.go"
+4. Database Ciphertext Persistence & Encrypted API Response: Setelah data diproses dan divalidasi, backend melakukan enkripsi ulang (*field-level encryption*) menggunakan `EncryptPII` KMS sebelum disimpan ke database PostgreSQL. API response mengembalikan data hasil simpanan database (di mana field `nik`, `full_name`, `email`, `phone_number` berupa nilai ciphertext terenkripsi) dengan status `PENDING_VERIFICATION` sesuai dengan format DTO pada `neocentra-bank-be-cs/internal/dto/register_cs_response.json`. contoh Response DTO Payload (Sesuai register_cs_response.json) di file "neocentra-bank-be-cs/internal/dto/register_response_dto.go"
 - Manajemen Kunci & Perangkat Keamanan Khusus :
 Key Management System (KMS): Mengatur siklus hidup kunci enkripsi secara terpusat, menerapkan Envelope Encryption (kunci data dienkripsi oleh kunci utama), serta melakukan rotasi kunci otomatis berkala (misalnya setiap 90–180 hari).
 - Local Key Management System (KMS) Architecture:
