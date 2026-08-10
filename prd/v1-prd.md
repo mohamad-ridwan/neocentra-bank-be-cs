@@ -52,6 +52,12 @@ teknik optimasi performa :
 - Redis (Mencegah double-submission formulir buka rekening jika user menekan tombol register berkali-kali dalam waktu bersamaan.). workflow :
 1. Idempotency Key: Frontend harus menghasilkan sebuah UUID unik (misalnya idempotency-key: f47ac10b-58cc-4372-a567-0e02b2c3d479) untuk setiap sesi register baru dan mengirimkannya di request header.
 2. Backend Validation: Backend akan menyimpan kunci tersebut di cache (seperti Redis) dengan waktu kedaluwarsa singkat (misal 5-10 menit). Jika backend menerima request dengan kunci yang sama, backend tidak akan mengeksekusi register baru, melainkan hanya mengembalikan respons dari register yang pertama.
+- Redis Infrastructure & Idempotency Strategy:
+  1. Dedicated Redis Deployment: Redis 7-Alpine di-deploy secara terisolasi pada Kubernetes lokal (Docker Desktop) untuk microservice `neocentra-bank-be-cs`.
+  2. Idempotency Key Pattern (`SETNX`):
+     - Membaca header `X-Idempotency-Key` dari request frontend.
+     - Menggunakan perintah Redis `SETNX` dengan TTL 10 menit untuk mengunci request yang sedang berjalan dan menyimpan ter-cache HTTP response.
+     - Mencegah *double-submission* saat tombol registrasi ditekan berulang kali, sehingga request duplikat langsung mendapatkan cached response tanpa menyentuh PostgreSQL (0 DB Hit).
 - Goroutine & Concurrency Optimization:
   1. Parallel Validation (Fan-Out/Fan-In): Menggunakan `golang.org/x/sync/errgroup` untuk mengecek keunikan NIK, Email, dan No HP secara eksekusi paralel di database, mengurangi latency validasi hingga 60-70%.
   2. Asynchronous Background Task (Worker Pool): Menggunakan Buffered Channel & Goroutine Worker Pool untuk memproses tugas non-core (seperti pengiriman email notifikasi dan pencatatan audit log) secara non-blocking setelah data profil `PENDING_VERIFICATION` sukses disimpan di DB.
