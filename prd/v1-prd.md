@@ -53,7 +53,7 @@ teknik optimasi performa :
 1. Idempotency Key: Frontend harus menghasilkan sebuah UUID unik (misalnya idempotency-key: f47ac10b-58cc-4372-a567-0e02b2c3d479) untuk setiap sesi register baru dan mengirimkannya di request header.
 2. Backend Validation: Backend akan menyimpan kunci tersebut di cache (seperti Redis) dengan waktu kedaluwarsa singkat (misal 5-10 menit). Jika backend menerima request dengan kunci yang sama, backend tidak akan mengeksekusi register baru, melainkan hanya mengembalikan respons dari register yang pertama.
 - Redis Infrastructure & Idempotency Strategy:
-  1. Dedicated Redis Deployment: Redis 7-Alpine di-deploy secara terisolasi pada Kubernetes lokal (Docker Desktop) untuk microservice `neocentra-bank-be-cs`.
+  1. Dedicated Redis Deployment: Redis 7-Alpine di-deploy secara terisolasi pada Kubernetes lokal (Docker Desktop) dengan port "6379" untuk microservice `neocentra-bank-be-cs`.
   2. Idempotency Key Pattern (`SETNX`):
      - Membaca header `X-Idempotency-Key` dari request frontend.
      - Menggunakan perintah Redis `SETNX` dengan TTL 10 menit untuk mengunci request yang sedang berjalan dan menyimpan ter-cache HTTP response.
