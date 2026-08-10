@@ -1,0 +1,14 @@
+{
+  "success": true,
+  "code": 201,
+  "message": "Formulir pendaftaran calon nasabah berhasil diterima dengan status PENDING_VERIFICATION",
+  "data": {
+    "customer_id": "a5d8f1e2-45bc-42b7-8d9e-1f2a3b4c5d6e",
+    "nik": "4f9b8c7d6e5f4a3b2c1d0e9f8a7b6",
+    "full_name": "Budi Santoso",
+    "email": "4f9b8c7d6e5f4a3b2c1d0e9f8a7b6",
+    "phone_number": "4f9b8c7d6e5f4a3b2c1d0e9f8a7b6",
+    "status": "PENDING_VERIFICATION",
+    "created_at": "2026-08-10T15:48:33Z"
+  }
+}

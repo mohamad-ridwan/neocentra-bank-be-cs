@@ -8,6 +8,20 @@ API Gateway :
 - rest api
 - gin (Framework HTTP handler)
 
+struktur endpoint :
+- Route Specifications:
+  1. POST /api/v1/customers/register : Endpoint formulir registrasi calon nasabah (nik, full_name, email, phone_number, address). logika dan handler (fungsi) sudah dibuatkan di file "neocentra-bank-be-cs/internal/delivery/http/handler/customer_handler.go" hanya perlu di sesuaikan (update) saja dengan "sistem keamanan".
+  2. GET /health : Public healthcheck endpoint. contoh logika dan handler (fungsi) sudah dibuatkan di file "neocentra-bank-be-cs/internal/delivery/http/router.go".
+
+- Middleware Stack:
+  1. CORS Middleware : Mengizinkan akses origin global (`Access-Control-Allow-Origin: *`) dan menangani preflight request `OPTIONS`.
+  2. Panic Recovery Middleware : Menangkap runtime panic di tengah eksekusi, mencegah server Go mati, dan mengembalikan HTTP response JSON 500 yang rapi.
+  3. JWT Authentication Middleware : Validasi token JWT algoritma HS256 dari header `Authorization: Bearer <token>` menggunakan `JWT_SECRET` yang dimuat dari `.env`.
+  4. contoh logika dan fungsi middleware sudah dibuatkan di file "neocentra-bank-be-cs/internal/delivery/http/middleware/middleware.go".
+
+PostgreSQL Driver :
+- jackc/pgx/v5 (dengan pgxpool). Lebih cepat 2-3x dibandingkan lib/pq standar. Mendukung native binary protocol PostgreSQL dan Connection Pooling otomatis.
+
 struktur proyek :
 - clean architecture
 - Hexagonal Architecture (Sudah diterapkan di micro "neocentra-bank-be-cs") hanya perlu diisikan logic dan lain lain. namun tetap mengikuti struktur clean architecture dan Hexagonal Architecture.
@@ -32,6 +46,7 @@ Key Management System (KMS): Mengatur siklus hidup kunci enkripsi secara terpusa
   3. Automatic Zero-Downtime Key Rotation:
      - Rotasi kunci otomatis secara berkala (interval 90 hari) dipicu oleh Goroutine Background Scheduler.
      - Keyset Tink menyimpan Primary Key baru untuk enkripsi data baru dan tetap mempertahankan kunci lama untuk dekripsi data legacy tanpa downtime.
+     4. logika dan fungsi kms sudah dibuat di file "neocentra-bank-be-cs/internal/usecase/kms_encryptor.go" dan sudah siap digunakan.
 
 teknik optimasi performa :
 - Redis (Mencegah double-submission formulir buka rekening jika user menekan tombol register berkali-kali dalam waktu bersamaan.). workflow :
