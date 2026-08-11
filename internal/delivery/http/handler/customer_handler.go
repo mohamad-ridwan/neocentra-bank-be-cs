@@ -1,8 +1,10 @@
 package handler
 
 import (
+	"errors"
 	"net/http"
 
+	"customer-service/internal/domain"
 	"customer-service/internal/dto"
 	"customer-service/internal/usecase"
 
@@ -18,14 +20,14 @@ func NewCustomerHandler(u *usecase.CustomerUseCase) *CustomerHandler {
 }
 
 func (h *CustomerHandler) RegisterCustomer(c *gin.Context) {
-	var req dto.OpenAccountRequest
+	var req dto.EncryptedRegisterCustomerRequest
 
-	// Validasi JSON Body & Go-Playground Validator
+	// Validasi JSON Body Binding
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"success": false,
 			"code":    http.StatusBadRequest,
-			"message": "Validasi input gagal: " + err.Error(),
+			"message": "Validasi input JSON gagal: " + err.Error(),
 		})
 		return
 	}
@@ -33,6 +35,26 @@ func (h *CustomerHandler) RegisterCustomer(c *gin.Context) {
 	// Eksekusi Register via UseCase
 	res, err := h.useCase.RegisterNewCustomer(c.Request.Context(), req)
 	if err != nil {
+		if errors.Is(err, domain.ErrDuplicateNIK) ||
+			errors.Is(err, domain.ErrDuplicateEmail) ||
+			errors.Is(err, domain.ErrDuplicatePhone) {
+			c.JSON(http.StatusConflict, gin.H{
+				"success": false,
+				"code":    http.StatusConflict,
+				"message": err.Error(),
+			})
+			return
+		}
+
+		if errors.Is(err, domain.ErrInvalidDecryption) {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"success": false,
+				"code":    http.StatusBadRequest,
+				"message": err.Error(),
+			})
+			return
+		}
+
 		c.JSON(http.StatusUnprocessableEntity, gin.H{
 			"success": false,
 			"code":    http.StatusUnprocessableEntity,
@@ -41,10 +63,10 @@ func (h *CustomerHandler) RegisterCustomer(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusCreated, gin.H{
-		"success": true,
-		"code":    http.StatusCreated,
-		"message": "Formulir pendaftaran calon nasabah berhasil diterima dengan status PENDING_VERIFICATION",
-		"data":    res,
+	c.JSON(http.StatusCreated, dto.RegisterCustomerAPIResponse{
+		Success: true,
+		Code:    http.StatusCreated,
+		Message: "Formulir pendaftaran calon nasabah berhasil diterima dengan status PENDING_VERIFICATION",
+		Data:    *res,
 	})
 }

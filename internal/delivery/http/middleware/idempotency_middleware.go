@@ -22,6 +22,11 @@ func (w bodyLogWriter) Write(b []byte) (int, error) {
 
 func IdempotencyMiddleware(rdb *redis.Client, ttl time.Duration) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if rdb == nil {
+			c.Next()
+			return
+		}
+
 		// 1. Ambil Header Idempotency Key
 		idempotencyKey := c.GetHeader("X-Idempotency-Key")
 
@@ -41,7 +46,7 @@ func IdempotencyMiddleware(rdb *redis.Client, ttl time.Duration) gin.HandlerFunc
 			// Response sudah ada di cache! Kembalikan langsung ke client tanpa hit DB
 			c.Header("Content-Type", "application/json")
 			c.Header("X-Cache", "HIT-IDEMPOTENCY")
-			c.String(http.StatusOK, cachedResp)
+			c.String(http.StatusCreated, cachedResp)
 			c.Abort()
 			return
 		}
@@ -57,7 +62,7 @@ func IdempotencyMiddleware(rdb *redis.Client, ttl time.Duration) gin.HandlerFunc
 			return
 		}
 
-		// Hapus lock jika terjadi crash
+		// Hapus lock jika terjadi crash atau selesai
 		defer rdb.Del(ctx, lockKey)
 
 		// 4. Intercept response body agar bisa disimpan di Redis

@@ -12,7 +12,7 @@ type RegisterCustomerResponseData struct {
 
 type RegisterCustomerAPIResponse struct {
 	Success bool                         `json:"success"`
-	Code    int                          "json:\"code\""
+	Code    int                          `json:"code"`
 	Message string                       `json:"message"`
 	Data    RegisterCustomerResponseData `json:"data"`
 }
