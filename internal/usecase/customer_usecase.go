@@ -107,8 +107,9 @@ func (u *CustomerUseCase) RegisterNewCustomer(
 	// 3. Parallel DB Uniqueness Check (Fan-Out/Fan-In via errgroup)
 	g, gCtx := errgroup.WithContext(ctx)
 
+	targetNIK := nikPlain
 	g.Go(func() error {
-		exists, err := u.customerRepo.ExistsByNIK(gCtx, nikPlain)
+		exists, err := u.customerRepo.ExistsByNIK(gCtx, targetNIK)
 		if err != nil {
 			return err
 		}
@@ -118,8 +119,9 @@ func (u *CustomerUseCase) RegisterNewCustomer(
 		return nil
 	})
 
+	targetEmail := emailPlain
 	g.Go(func() error {
-		exists, err := u.customerRepo.ExistsByEmail(gCtx, emailPlain)
+		exists, err := u.customerRepo.ExistsByEmail(gCtx, targetEmail)
 		if err != nil {
 			return err
 		}
@@ -129,8 +131,9 @@ func (u *CustomerUseCase) RegisterNewCustomer(
 		return nil
 	})
 
+	targetPhone := phonePlain
 	g.Go(func() error {
-		exists, err := u.customerRepo.ExistsByPhone(gCtx, phonePlain)
+		exists, err := u.customerRepo.ExistsByPhone(gCtx, targetPhone)
 		if err != nil {
 			return err
 		}

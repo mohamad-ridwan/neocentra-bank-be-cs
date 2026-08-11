@@ -68,7 +68,7 @@ func main() {
 	// 5. Initialize Repository, WorkerPool & UseCase
 	var custRepo usecase.CustomerRepository
 	if dbPool != nil {
-		custRepo = postgres.NewCustomerRepository(dbPool)
+		custRepo = postgres.NewCustomerRepository(dbPool, kmsService)
 	}
 
 	workerPool := usecase.NewWorkerPool(5, 100)
