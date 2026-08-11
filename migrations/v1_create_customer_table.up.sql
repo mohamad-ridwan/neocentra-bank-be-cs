@@ -5,11 +5,11 @@ CREATE TYPE customer_status_enum AS ENUM ('PENDING_VERIFICATION', 'ACTIVE', 'REJ
 -- ============================================================================
 CREATE TABLE customers (
     customer_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    nik VARCHAR(16) UNIQUE NOT NULL,
-    full_name VARCHAR(100) NOT NULL,
-    email VARCHAR(100) UNIQUE NOT NULL,
-    phone_number VARCHAR(20) UNIQUE NOT NULL,
-    address TEXT NOT NULL,
+    nik BYTEA UNIQUE NOT NULL,
+    full_name BYTEA NOT NULL,
+    email BYTEA UNIQUE NOT NULL,
+    phone_number BYTEA UNIQUE NOT NULL,
+    address BYTEA NOT NULL,
     status customer_status_enum NOT NULL DEFAULT 'PENDING_VERIFICATION',
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP

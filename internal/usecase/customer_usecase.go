@@ -144,35 +144,35 @@ func (u *CustomerUseCase) RegisterNewCustomer(
 		return nil, err
 	}
 
-	// 4. Enkripsi Ulang PII Data Simpanan DB
-	encNIKForDB, err := u.kmsService.EncryptPII(nikPlain, AAD_NIK)
+	// 4. Enkripsi Ulang PII Data Simpanan DB (Biner BYTEA murni)
+	encNIKBytes, err := u.kmsService.EncryptPII(nikPlain, AAD_NIK)
 	if err != nil {
 		return nil, fmt.Errorf("gagal mengenkripsi NIK: %w", err)
 	}
-	encFullNameForDB, err := u.kmsService.EncryptPII(fullNamePlain, AAD_FULL_NAME)
+	encFullNameBytes, err := u.kmsService.EncryptPII(fullNamePlain, AAD_FULL_NAME)
 	if err != nil {
 		return nil, fmt.Errorf("gagal mengenkripsi FullName: %w", err)
 	}
-	encEmailForDB, err := u.kmsService.EncryptPII(emailPlain, AAD_EMAIL)
+	encEmailBytes, err := u.kmsService.EncryptPII(emailPlain, AAD_EMAIL)
 	if err != nil {
 		return nil, fmt.Errorf("gagal mengenkripsi Email: %w", err)
 	}
-	encPhoneForDB, err := u.kmsService.EncryptPII(phonePlain, AAD_PHONE)
+	encPhoneBytes, err := u.kmsService.EncryptPII(phonePlain, AAD_PHONE)
 	if err != nil {
 		return nil, fmt.Errorf("gagal mengenkripsi Phone: %w", err)
 	}
-	encAddressForDB, err := u.kmsService.EncryptPII(addressPlain, AAD_ADDRESS)
+	encAddressBytes, err := u.kmsService.EncryptPII(addressPlain, AAD_ADDRESS)
 	if err != nil {
 		return nil, fmt.Errorf("gagal mengenkripsi Address: %w", err)
 	}
 
 	// 5. Simpan Record ke Database PostgreSQL (Status: PENDING_VERIFICATION)
 	customer := &domain.Customer{
-		NIK:         encNIKForDB,
-		FullName:    encFullNameForDB,
-		Email:       encEmailForDB,
-		PhoneNumber: encPhoneForDB,
-		Address:     encAddressForDB,
+		NIK:         encNIKBytes,
+		FullName:    encFullNameBytes,
+		Email:       encEmailBytes,
+		PhoneNumber: encPhoneBytes,
+		Address:     encAddressBytes,
 		Status:      domain.StatusPendingVerification,
 	}
 
@@ -194,7 +194,7 @@ func (u *CustomerUseCase) RegisterNewCustomer(
 		})
 	}
 
-	// 7. Format Response DTO (Field ciphertext hasil simpanan DB)
+	// 7. Format Response DTO (Field ciphertext biner []byte hasil simpanan DB)
 	return &dto.RegisterCustomerResponseData{
 		CustomerID:  customer.CustomerID,
 		NIK:         customer.NIK,

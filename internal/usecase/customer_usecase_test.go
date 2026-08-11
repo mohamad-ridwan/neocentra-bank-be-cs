@@ -104,7 +104,7 @@ func TestCustomerUseCase_RegisterNewCustomer(t *testing.T) {
 
 	// 3. Invalid Decryption Test
 	invalidReq := req
-	invalidReq.NIK = "invalid-base64-string!!"
+	invalidReq.NIK = []byte("invalid-binary-bytes!!")
 	_, err = uc.RegisterNewCustomer(ctx, invalidReq)
 	if err == nil || !strings.Contains(err.Error(), "dekripsi gagal") {
 		t.Errorf("expected decryption error, got: %v", err)

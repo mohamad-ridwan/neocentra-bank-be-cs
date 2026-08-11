@@ -2,10 +2,10 @@ package dto
 
 type RegisterCustomerResponseData struct {
 	CustomerID  string `json:"customer_id"`
-	NIK         string `json:"nik"`          // Ciphertext hasil simpanan DB
-	FullName    string `json:"full_name"`    // Ciphertext hasil simpanan DB
-	Email       string `json:"email"`        // Ciphertext hasil simpanan DB
-	PhoneNumber string `json:"phone_number"` // Ciphertext hasil simpanan DB
+	NIK         []byte `json:"nik"`          // Ciphertext biner (BYTEA) hasil simpanan DB
+	FullName    []byte `json:"full_name"`    // Ciphertext biner (BYTEA) hasil simpanan DB
+	Email       []byte `json:"email"`        // Ciphertext biner (BYTEA) hasil simpanan DB
+	PhoneNumber []byte `json:"phone_number"` // Ciphertext biner (BYTEA) hasil simpanan DB
 	Status      string `json:"status"`       // "PENDING_VERIFICATION"
 	CreatedAt   string `json:"created_at"`
 }

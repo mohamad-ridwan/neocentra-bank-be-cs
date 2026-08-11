@@ -1,12 +1,12 @@
 package dto
 
-// EncryptedRegisterCustomerRequest menerima payload ciphertext dari frontend
+// EncryptedRegisterCustomerRequest menerima payload ciphertext biner (BYTEA) dari frontend/client
 type EncryptedRegisterCustomerRequest struct {
-	NIK         string `json:"nik" validate:"required"`         // Encrypted Base64 Tink String
-	FullName    string `json:"full_name" validate:"required"`   // Encrypted Base64 Tink String
-	Email       string `json:"email" validate:"required"`       // Encrypted Base64 Tink String
-	PhoneNumber string `json:"phone_number" validate:"required"`// Encrypted Base64 Tink String
-	Address     string `json:"address" validate:"required"`     // Encrypted Base64 Tink String
+	NIK         []byte `json:"nik" validate:"required"`         // Encrypted Binary BYTEA Bytes
+	FullName    []byte `json:"full_name" validate:"required"`   // Encrypted Binary BYTEA Bytes
+	Email       []byte `json:"email" validate:"required"`       // Encrypted Binary BYTEA Bytes
+	PhoneNumber []byte `json:"phone_number" validate:"required"`// Encrypted Binary BYTEA Bytes
+	Address     []byte `json:"address" validate:"required"`     // Encrypted Binary BYTEA Bytes
 }
 
 // PlaintextRegisterCustomer internal struct setelah didekripsi

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/base64"
 	"fmt"
 	"log"
 	"sync"
@@ -115,26 +114,21 @@ func (s *LocalKMSService) loadOrCreateKeyset(ctx context.Context, keyName string
 	return nil
 }
 
-// EncryptPII mengenkripsi plaintext (misal NIK) dengan AAD (Associated Authenticated Data)
-func (s *LocalKMSService) EncryptPII(plaintext string, aad string) (string, error) {
+// EncryptPII mengenkripsi plaintext ke biner []byte murni (Google Tink AEAD tanpa Base64 encoding)
+func (s *LocalKMSService) EncryptPII(plaintext string, aad string) ([]byte, error) {
 	s.mu.RLock()
 	aeadPrimitive := s.aead
 	s.mu.RUnlock()
 
 	ciphertext, err := aeadPrimitive.Encrypt([]byte(plaintext), []byte(aad))
 	if err != nil {
-		return "", fmt.Errorf("failed to encrypt PII: %w", err)
+		return nil, fmt.Errorf("failed to encrypt PII: %w", err)
 	}
-	return base64.StdEncoding.EncodeToString(ciphertext), nil
+	return ciphertext, nil
 }
 
-// DecryptPII mendekripsi ciphertext PII (Tink otomatis mendeteksi Key ID mana yang dipakai)
-func (s *LocalKMSService) DecryptPII(ciphertextBase64 string, aad string) (string, error) {
-	ciphertext, err := base64.StdEncoding.DecodeString(ciphertextBase64)
-	if err != nil {
-		return "", fmt.Errorf("invalid base64 ciphertext: %w", err)
-	}
-
+// DecryptPII mendekripsi raw biner ciphertext []byte (BYTEA) dari PostgreSQL / Client secara langsung
+func (s *LocalKMSService) DecryptPII(ciphertext []byte, aad string) (string, error) {
 	s.mu.RLock()
 	aeadPrimitive := s.aead
 	s.mu.RUnlock()
