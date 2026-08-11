@@ -56,9 +56,14 @@ func (s *LocalKMSService) loadOrCreateKeyset(ctx context.Context, keyName string
 		return fmt.Errorf("failed to create master AEAD primitive: %w", err)
 	}
 
-	encryptedKeyset, version, err := s.repo.GetKeysetByName(ctx, keyName)
-	if err != nil || len(encryptedKeyset) == 0 {
-		// Keyset belum ada, buat keyset baru
+	var encryptedKeyset []byte
+	var version int
+	if s.repo != nil {
+		encryptedKeyset, version, err = s.repo.GetKeysetByName(ctx, keyName)
+	}
+
+	if s.repo == nil || err != nil || len(encryptedKeyset) == 0 {
+		// Keyset belum ada di DB atau repo nil, buat keyset baru
 		kh, err := keyset.NewHandle(aead.AES256GCMKeyTemplate())
 		if err != nil {
 			return fmt.Errorf("failed to create new keyset handle: %w", err)
@@ -71,8 +76,10 @@ func (s *LocalKMSService) loadOrCreateKeyset(ctx context.Context, keyName string
 		}
 
 		primaryKeyID := kh.KeysetInfo().GetPrimaryKeyId()
-		if err := s.repo.SaveKeyset(ctx, keyName, buf.Bytes(), primaryKeyID, 1); err != nil {
-			return fmt.Errorf("failed to save keyset to repository: %w", err)
+		if s.repo != nil {
+			if err := s.repo.SaveKeyset(ctx, keyName, buf.Bytes(), primaryKeyID, 1); err != nil {
+				return fmt.Errorf("failed to save keyset to repository: %w", err)
+			}
 		}
 
 		primitive, err := aead.New(kh)
@@ -174,8 +181,10 @@ func (s *LocalKMSService) RotateKey(ctx context.Context, keyName string) error {
 
 	primaryKeyID := kh.KeysetInfo().GetPrimaryKeyId()
 	newVersion := currentVersion + 1
-	if err := s.repo.UpdateKeyset(ctx, keyName, buf.Bytes(), primaryKeyID, newVersion); err != nil {
-		return fmt.Errorf("failed to update rotated keyset in repository: %w", err)
+	if s.repo != nil {
+		if err := s.repo.UpdateKeyset(ctx, keyName, buf.Bytes(), primaryKeyID, newVersion); err != nil {
+			return fmt.Errorf("failed to update rotated keyset in repository: %w", err)
+		}
 	}
 
 	primitive, err := aead.New(kh)

@@ -19,24 +19,32 @@ func LoadConfig() *Config {
 	loadDotEnv(".env")
 
 	return &Config{
-		Port:              getEnv("PORT", "8085"),
-		JWTSecret:         getEnv("JWT_SECRET", "neocentra_jwt_secret_2026"),
-		LocalKMSMasterKey: getEnv("LOCAL_KMS_MASTER_KEY", "neocentra_master_kek_secret_key_32b!"),
-		DatabaseURL:       getEnv("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/neocentra_cs?sslmode=disable"),
-		RedisURL:          getEnv("REDIS_URL", "redis://localhost:6379/0"),
+		Port:              os.Getenv("PORT"),
+		JWTSecret:         os.Getenv("JWT_SECRET"),
+		LocalKMSMasterKey: os.Getenv("LOCAL_KMS_MASTER_KEY"),
+		DatabaseURL:       os.Getenv("DATABASE_URL"),
+		RedisURL:          os.Getenv("REDIS_URL"),
 	}
 }
 
-func getEnv(key, fallback string) string {
-	if val := os.Getenv(key); val != "" {
-		return val
-	}
-	return fallback
-}
+// func getEnv(key, fallback string) string {
+// 	if val := os.Getenv(key); val != "" {
+// 		return val
+// 	}
+// 	return fallback
+// }
 
 func loadDotEnv(filepath string) {
-	file, err := os.Open(filepath)
-	if err != nil {
+	paths := []string{filepath, "../.env", "../../.env"}
+	var file *os.File
+	var err error
+	for _, p := range paths {
+		file, err = os.Open(p)
+		if err == nil {
+			break
+		}
+	}
+	if err != nil || file == nil {
 		return
 	}
 	defer file.Close()
