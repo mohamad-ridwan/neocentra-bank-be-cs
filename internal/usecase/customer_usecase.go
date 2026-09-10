@@ -3,6 +3,7 @@ package usecase
 import (
 	"context"
 	"fmt"
+	"log"
 	"time"
 
 	"customer-service/internal/domain"
@@ -44,6 +45,12 @@ func (u *CustomerUseCase) RegisterNewCustomer(
 	ctx context.Context,
 	req dto.EncryptedRegisterCustomerRequest,
 ) (*dto.RegisterCustomerResponseData, error) {
+	log.Println("1. RegisterNewCustomer: Start")
+	log.Println("1.1. RegisterNewCustomer: NIK", req.NIK)
+	log.Println("1.2. RegisterNewCustomer: FullName", req.FullName)
+	log.Println("1.3. RegisterNewCustomer: Email", req.Email)
+	log.Println("1.4. RegisterNewCustomer: PhoneNumber", req.PhoneNumber)
+	log.Println("1.5. RegisterNewCustomer: Address", req.Address)
 
 	// 1. Dekripsi Payload Encrypted Base64 dari Frontend
 	nikPlain, err := u.kmsService.DecryptPII(req.NIK, AAD_NIK)

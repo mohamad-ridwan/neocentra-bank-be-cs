@@ -2,8 +2,11 @@ package handler
 
 import (
 	"errors"
+	"io"
 	"net/http"
+	"strings"
 
+	"customer-service/internal/delivery/http/serializer"
 	"customer-service/internal/domain"
 	"customer-service/internal/dto"
 	"customer-service/internal/usecase"
@@ -21,18 +24,44 @@ func NewCustomerHandler(u *usecase.CustomerUseCase) *CustomerHandler {
 
 func (h *CustomerHandler) RegisterCustomer(c *gin.Context) {
 	var req dto.EncryptedRegisterCustomerRequest
+	contentType := c.GetHeader("Content-Type")
 
-	// Validasi JSON Body Binding
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"success": false,
-			"code":    http.StatusBadRequest,
-			"message": "Validasi input JSON gagal: " + err.Error(),
-		})
-		return
+	if strings.Contains(contentType, "application/octet-stream") {
+		// 1. Baca Raw Binary Stream dari Request Body
+		bodyBytes, err := io.ReadAll(c.Request.Body)
+		if err != nil || len(bodyBytes) == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"success": false,
+				"code":    http.StatusBadRequest,
+				"message": "Gagal membaca binary request body",
+			})
+			return
+		}
+
+		// 2. Unpack TLV Binary Framing
+		parsedReq, _, err := serializer.UnpackCustomerTLV(bodyBytes)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"success": false,
+				"code":    http.StatusBadRequest,
+				"message": "Format binary TLV tidak valid: " + err.Error(),
+			})
+			return
+		}
+		req = *parsedReq
+	} else {
+		// Fallback untuk client yang mengirim format JSON
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"success": false,
+				"code":    http.StatusBadRequest,
+				"message": "Validasi input JSON gagal: " + err.Error(),
+			})
+			return
+		}
 	}
 
-	// Eksekusi Register via UseCase
+	// 3. Eksekusi Register via UseCase
 	res, err := h.useCase.RegisterNewCustomer(c.Request.Context(), req)
 	if err != nil {
 		if errors.Is(err, domain.ErrDuplicateNIK) ||
@@ -50,7 +79,7 @@ func (h *CustomerHandler) RegisterCustomer(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{
 				"success": false,
 				"code":    http.StatusBadRequest,
-				"message": err.Error(),
+				"message": "Dekripsi payload gagal. Kredensial kriptografi tidak sesuai.",
 			})
 			return
 		}

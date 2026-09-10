@@ -26,11 +26,26 @@ func SetupRouter(custHandler *handler.CustomerHandler, rdb *redis.Client) *gin.E
 		})
 	})
 
-	// Protected API Routes v1
+	// API Routes v1
 	v1 := r.Group("/api/v1")
-	v1.Use(middleware.JWTAuthMiddleware())
 	{
-		v1.POST("/customers/register", middleware.IdempotencyMiddleware(rdb, 10*time.Minute), custHandler.RegisterCustomer)
+		// 1. PUBLIC ONBOARDING & AUTH (Tanpa User JWT)
+		public := v1.Group("")
+		public.Use(
+			middleware.AntiReplayMiddleware(rdb, 60*time.Second),
+			middleware.RequestSignatureMiddleware(),
+			middleware.IdempotencyMiddleware(rdb, 10*time.Minute),
+		)
+		{
+			public.POST("/customers/register", custHandler.RegisterCustomer)
+		}
+
+		// 2. PROTECTED ROUTES (Wajib User JWT Terverifikasi)
+		protected := v1.Group("")
+		protected.Use(middleware.JWTAuthMiddleware())
+		{
+			// Endpoint yang membutuhkan autentikasi JWT pengguna terdaftar
+		}
 	}
 
 	return r
