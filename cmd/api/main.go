@@ -15,6 +15,7 @@ import (
 	deliveryHttp "customer-service/internal/delivery/http"
 	"customer-service/internal/delivery/http/handler"
 	"customer-service/internal/repository/postgres"
+	"customer-service/internal/security"
 	"customer-service/internal/usecase"
 	"customer-service/pkg/database"
 )
@@ -65,7 +66,7 @@ func main() {
 	defer cancelKMSWorker()
 	kmsService.StartRotationWorker(kmsWorkerCtx, "customer_pii_keyset", 90*24*time.Hour)
 
-	// 5. Initialize Repository, WorkerPool & UseCase
+	// 5. Initialize Repository, WorkerPool, Transit Decryptor & UseCase
 	var custRepo usecase.CustomerRepository
 	if dbPool != nil {
 		custRepo = postgres.NewCustomerRepository(dbPool, kmsService)
@@ -73,7 +74,27 @@ func main() {
 
 	workerPool := usecase.NewWorkerPool(5, 100)
 
-	custUseCase := usecase.NewCustomerUseCase(custRepo, kmsService, workerPool)
+	var transitDecryptor *security.TransitDecryptor
+	if cfg.TransitPrivateKeyPEM != "" {
+		privKey, err := security.ParsePrivateKeyFromPEM([]byte(cfg.TransitPrivateKeyPEM))
+		if err != nil {
+			log.Printf("[WARNING] Failed to parse TRANSIT_RSA_PRIVATE_KEY: %v. Generating ephemeral key for dev.", err)
+			privKey, _, _ = security.GenerateRSAKeyPair(2048)
+		}
+		transitDecryptor = security.NewTransitDecryptor(privKey)
+	} else {
+		privKey, pubKey, err := security.GenerateRSAKeyPair(2048)
+		if err != nil {
+			log.Printf("[WARNING] Failed to generate ephemeral transit key: %v", err)
+		} else {
+			transitDecryptor = security.NewTransitDecryptor(privKey)
+			pubPEM, _ := security.ExportPublicKeyToPEM(pubKey)
+			log.Println("[INFO] Ephemeral Transit RSA Public Key generated for dev mode:")
+			log.Println(string(pubPEM))
+		}
+	}
+
+	custUseCase := usecase.NewCustomerUseCase(custRepo, kmsService, workerPool, transitDecryptor)
 
 	// 6. Initialize Delivery Layer (Handler & Router)
 	custHandler := handler.NewCustomerHandler(custUseCase)

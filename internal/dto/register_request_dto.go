@@ -11,9 +11,11 @@ type EncryptedRegisterCustomerRequest struct {
 
 // PlaintextRegisterCustomer internal struct setelah didekripsi
 type PlaintextRegisterCustomer struct {
-	NIK         string `validate:"required,numeric,len=16"`
-	FullName    string `validate:"required,min=3,max=100"`
-	Email       string `validate:"required,email"`
-	PhoneNumber string `validate:"required,e164"`
-	Address     string `validate:"required,min=10"`
+	NIK         string `json:"nik" validate:"required,numeric,len=16"`
+	FullName    string `json:"full_name" validate:"required,min=3,max=100"`
+	Email       string `json:"email" validate:"required,email"`
+	PhoneNumber string `json:"phone_number" validate:"required,e164"`
+	Address     string `json:"address" validate:"required,min=10"`
+	Password    string `json:"password,omitempty"`
 }
+

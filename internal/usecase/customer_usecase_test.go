@@ -8,6 +8,7 @@ import (
 
 	"customer-service/internal/domain"
 	"customer-service/internal/dto"
+	"customer-service/internal/security"
 	"customer-service/internal/usecase"
 )
 
@@ -110,3 +111,134 @@ func TestCustomerUseCase_RegisterNewCustomer(t *testing.T) {
 		t.Errorf("expected decryption error, got: %v", err)
 	}
 }
+
+func TestCustomerUseCase_RegisterNewCustomerRaw_HybridEncryption(t *testing.T) {
+	kmsRepo := mockRepo()
+	masterKey := "super-secret-master-key-32bytes!"
+	kmsService, err := usecase.NewLocalKMSService(masterKey, kmsRepo)
+	if err != nil {
+		t.Fatalf("failed to init KMS: %v", err)
+	}
+
+	custRepo := mockCustomerRepo()
+	workerPool := usecase.NewWorkerPool(2, 10)
+	defer workerPool.Shutdown(context.Background())
+
+	// Generate RSA key pair for transit encryption
+	privKey, pubKey, err := security.GenerateRSAKeyPair(2048)
+	if err != nil {
+		t.Fatalf("failed to generate RSA key: %v", err)
+	}
+
+	transitDec := security.NewTransitDecryptor(privKey)
+	uc := usecase.NewCustomerUseCase(custRepo, kmsService, workerPool, transitDec)
+
+	// Plaintext registration payload from mobile app
+	customerJSON := []byte(`{
+		"nik": "3201012345670001",
+		"full_name": "Siti Nurhaliza",
+		"email": "siti.nurhaliza@example.com",
+		"phone_number": "+6281298765432",
+		"address": "Jl. Gatot Subroto No. 50, Jakarta",
+		"password": "SecurePassword123!"
+	}`)
+
+	// Encrypt using hybrid RSA-OAEP + AES-256-GCM (Pola 1)
+	encryptedRawBody, err := security.EncryptRawTransitPayload(pubKey, customerJSON)
+	if err != nil {
+		t.Fatalf("failed to encrypt hybrid payload: %v", err)
+	}
+
+	ctx := context.Background()
+
+	// 1. Success Registration via Raw Hybrid Payload
+	resp, err := uc.RegisterNewCustomerRaw(ctx, encryptedRawBody)
+	if err != nil {
+		t.Fatalf("expected successful raw registration, got: %v", err)
+	}
+
+	if resp.CustomerID != "mock-uuid-1234-5678" {
+		t.Errorf("expected customer id mock-uuid-1234-5678, got %s", resp.CustomerID)
+	}
+
+	if resp.Status != string(domain.StatusPendingVerification) {
+		t.Errorf("expected status PENDING_VERIFICATION, got %s", resp.Status)
+	}
+
+	// Verify that the stored customer in repo was encrypted using Tink KMS Keyset
+	savedCust := custRepo.customers[resp.CustomerID]
+	if savedCust == nil {
+		t.Fatal("expected customer to be saved in repository")
+	}
+
+	// Decrypt using KMS service to verify data-at-rest Tink preservation
+	decNIK, err := kmsService.DecryptPII(savedCust.NIK, usecase.AAD_NIK)
+	if err != nil {
+		t.Fatalf("failed to decrypt saved NIK with KMS: %v", err)
+	}
+	if decNIK != "3201012345670001" {
+		t.Errorf("expected saved NIK 3201012345670001, got %s", decNIK)
+	}
+
+	// 2. Corrupted Payload Error
+	corrupted := append([]byte(nil), encryptedRawBody...)
+	corrupted[len(corrupted)-1] ^= 0xFF
+	_, err = uc.RegisterNewCustomerRaw(ctx, corrupted)
+	if err == nil {
+		t.Fatal("expected error on corrupted raw payload, got nil")
+	}
+}
+
+func TestCustomerUseCase_PhoneNumberNormalization_LocalFormat(t *testing.T) {
+	kmsRepo := mockRepo()
+	masterKey := "super-secret-master-key-32bytes!"
+	kmsService, err := usecase.NewLocalKMSService(masterKey, kmsRepo)
+	if err != nil {
+		t.Fatalf("failed to init KMS: %v", err)
+	}
+
+	custRepo := mockCustomerRepo()
+	workerPool := usecase.NewWorkerPool(2, 10)
+	defer workerPool.Shutdown(context.Background())
+
+	privKey, pubKey, _ := security.GenerateRSAKeyPair(2048)
+	transitDec := security.NewTransitDecryptor(privKey)
+	uc := usecase.NewCustomerUseCase(custRepo, kmsService, workerPool, transitDec)
+
+	// Payload with local phone number "081234567890" without +62 prefix
+	customerJSON := []byte(`{
+		"nik": "3201015555550001",
+		"full_name": "Rudi Tabuti",
+		"email": "rudi.tabuti@example.com",
+		"phone_number": "081234567890",
+		"address": "Jl. Melawai Raya No. 12, Jakarta",
+		"password": "SecurePassword123!"
+	}`)
+
+	encryptedRawBody, err := security.EncryptRawTransitPayload(pubKey, customerJSON)
+	if err != nil {
+		t.Fatalf("failed to encrypt: %v", err)
+	}
+
+	ctx := context.Background()
+	resp, err := uc.RegisterNewCustomerRaw(ctx, encryptedRawBody)
+	if err != nil {
+		t.Fatalf("expected successful registration with local phone number, got error: %v", err)
+	}
+
+	savedCust := custRepo.customers[resp.CustomerID]
+	if savedCust == nil {
+		t.Fatal("expected customer to be saved")
+	}
+
+	decPhone, err := kmsService.DecryptPII(savedCust.PhoneNumber, usecase.AAD_PHONE)
+	if err != nil {
+		t.Fatalf("failed to decrypt phone with KMS: %v", err)
+	}
+
+	if decPhone != "+6281234567890" {
+		t.Errorf("expected phone number to be normalized to '+6281234567890', got '%s'", decPhone)
+	}
+}
+
+

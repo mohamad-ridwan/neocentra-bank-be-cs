@@ -20,6 +20,7 @@ import (
 	"customer-service/internal/delivery/http/serializer"
 	"customer-service/internal/domain"
 	"customer-service/internal/dto"
+	"customer-service/internal/security"
 	"customer-service/internal/usecase"
 
 	"context"
@@ -184,3 +185,73 @@ func TestRouter_RejectInvalidSignature(t *testing.T) {
 		t.Errorf("expected 401 Unauthorized for invalid signature, got %d", w.Code)
 	}
 }
+
+func TestRouter_PublicRegisterWithHybridEncryptionPola1(t *testing.T) {
+	// Setup KMS, TransitDecryptor & UseCase
+	masterKey := "neocentra_mock_master_key_for_testing_32bytes!"
+	kmsService, err := usecase.NewLocalKMSService(masterKey, nil)
+	if err != nil {
+		t.Fatalf("failed to init KMS: %v", err)
+	}
+
+	privKey, pubKey, err := security.GenerateRSAKeyPair(2048)
+	if err != nil {
+		t.Fatalf("failed to generate RSA key: %v", err)
+	}
+	transitDec := security.NewTransitDecryptor(privKey)
+
+	repo := &mockCustRepo{customers: make(map[string]*domain.Customer)}
+	wp := usecase.NewWorkerPool(2, 10)
+	defer wp.Shutdown(context.Background())
+
+	uc := usecase.NewCustomerUseCase(repo, kmsService, wp, transitDec)
+	custHandler := handler.NewCustomerHandler(uc)
+	router := delivery.SetupRouter(custHandler, nil)
+
+	customerJSON := []byte(`{
+		"nik": "3201019999990001",
+		"full_name": "Ahmad Yani",
+		"email": "ahmad.yani@neocentra.bank",
+		"phone_number": "+6281312345678",
+		"address": "Jl. Merdeka No. 1, Bandung",
+		"password": "SecurePassword123!"
+	}`)
+
+	// Encrypt using hybrid RSA-OAEP + AES-256-GCM (Pola 1)
+	rawBody, err := security.EncryptRawTransitPayload(pubKey, customerJSON)
+	if err != nil {
+		t.Fatalf("failed to encrypt hybrid payload: %v", err)
+	}
+
+	timestamp := time.Now().UTC().Format(time.RFC3339Nano)
+	nonce := "random-nonce-hybrid-1"
+	path := "/api/v1/customers/register"
+	sig := generateSignature("POST", path, rawBody, timestamp, nonce)
+
+	req, _ := http.NewRequest("POST", path, bytes.NewReader(rawBody))
+	req.Header.Set("Content-Type", "application/octet-stream")
+	req.Header.Set("X-Timestamp", timestamp)
+	req.Header.Set("X-Nonce", nonce)
+	req.Header.Set("X-Signature", sig)
+	req.Header.Set("X-Idempotency-Key", "idem-hybrid-key-1")
+
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected status 201 Created, got %d. Body: %s", w.Code, w.Body.String())
+	}
+
+	var resp dto.RegisterCustomerAPIResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse JSON response: %v", err)
+	}
+
+	if !resp.Success {
+		t.Errorf("expected success: true, got false")
+	}
+	if resp.Data.CustomerID != "test-cust-id-123" {
+		t.Errorf("expected CustomerID 'test-cust-id-123', got '%s'", resp.Data.CustomerID)
+	}
+}
+

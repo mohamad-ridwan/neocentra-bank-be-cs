@@ -7,11 +7,12 @@ import (
 )
 
 type Config struct {
-	Port              string
-	JWTSecret         string
-	LocalKMSMasterKey string
-	DatabaseURL       string
-	RedisURL          string
+	Port                 string
+	JWTSecret            string
+	LocalKMSMasterKey    string
+	DatabaseURL          string
+	RedisURL             string
+	TransitPrivateKeyPEM string
 }
 
 func LoadConfig() *Config {
@@ -19,11 +20,12 @@ func LoadConfig() *Config {
 	loadDotEnv(".env")
 
 	return &Config{
-		Port:              os.Getenv("PORT"),
-		JWTSecret:         os.Getenv("JWT_SECRET"),
-		LocalKMSMasterKey: os.Getenv("LOCAL_KMS_MASTER_KEY"),
-		DatabaseURL:       os.Getenv("DATABASE_URL"),
-		RedisURL:          os.Getenv("REDIS_URL"),
+		Port:                 os.Getenv("PORT"),
+		JWTSecret:            os.Getenv("JWT_SECRET"),
+		LocalKMSMasterKey:    os.Getenv("LOCAL_KMS_MASTER_KEY"),
+		DatabaseURL:          os.Getenv("DATABASE_URL"),
+		RedisURL:             os.Getenv("REDIS_URL"),
+		TransitPrivateKeyPEM: os.Getenv("TRANSIT_RSA_PRIVATE_KEY"),
 	}
 }
 

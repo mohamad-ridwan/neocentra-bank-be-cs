@@ -2,12 +2,16 @@ package usecase
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"customer-service/internal/domain"
 	"customer-service/internal/dto"
+	"customer-service/internal/security"
 
 	"github.com/go-playground/validator/v10"
 	"golang.org/x/sync/errgroup"
@@ -22,23 +26,63 @@ const (
 )
 
 type CustomerUseCase struct {
-	customerRepo CustomerRepository
-	kmsService   *LocalKMSService
-	workerPool   *WorkerPool
-	validate     *validator.Validate
+	customerRepo     CustomerRepository
+	kmsService       *LocalKMSService
+	workerPool       *WorkerPool
+	validate         *validator.Validate
+	transitDecryptor *security.TransitDecryptor
 }
 
 func NewCustomerUseCase(
 	repo CustomerRepository,
 	kms *LocalKMSService,
 	wp *WorkerPool,
+	transitDec ...*security.TransitDecryptor,
 ) *CustomerUseCase {
-	return &CustomerUseCase{
+	uc := &CustomerUseCase{
 		customerRepo: repo,
 		kmsService:   kms,
 		workerPool:   wp,
 		validate:     validator.New(),
 	}
+	if len(transitDec) > 0 && transitDec[0] != nil {
+		uc.transitDecryptor = transitDec[0]
+	}
+	return uc
+}
+
+func (u *CustomerUseCase) SetTransitDecryptor(d *security.TransitDecryptor) {
+	u.transitDecryptor = d
+}
+
+func (u *CustomerUseCase) HasTransitDecryptor() bool {
+	return u.transitDecryptor != nil
+}
+
+
+// RegisterNewCustomerRaw mendekripsi raw binary transit payload (Pola 1: RSA-OAEP + AES-256-GCM)
+func (u *CustomerUseCase) RegisterNewCustomerRaw(
+	ctx context.Context,
+	rawBody []byte,
+) (*dto.RegisterCustomerResponseData, error) {
+	if u.transitDecryptor == nil {
+		return nil, errors.New("transit decryptor is not configured")
+	}
+
+	// 1. Dekripsi raw transit body via transitDecryptor
+	decryptedJSON, err := u.transitDecryptor.DecryptRawTransitPayload(rawBody)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", domain.ErrInvalidDecryption, err)
+	}
+
+	// 2. Unmarshal JSON plaintext ke PlaintextRegisterCustomer
+	var plainDTO dto.PlaintextRegisterCustomer
+	if err := json.Unmarshal(decryptedJSON, &plainDTO); err != nil {
+		return nil, fmt.Errorf("format JSON hasil dekripsi tidak valid: %w", err)
+	}
+
+	// 3. Proses registrasi
+	return u.processRegistration(ctx, plainDTO)
 }
 
 func (u *CustomerUseCase) RegisterNewCustomer(
@@ -46,13 +90,8 @@ func (u *CustomerUseCase) RegisterNewCustomer(
 	req dto.EncryptedRegisterCustomerRequest,
 ) (*dto.RegisterCustomerResponseData, error) {
 	log.Println("1. RegisterNewCustomer: Start")
-	log.Println("1.1. RegisterNewCustomer: NIK", req.NIK)
-	log.Println("1.2. RegisterNewCustomer: FullName", req.FullName)
-	log.Println("1.3. RegisterNewCustomer: Email", req.Email)
-	log.Println("1.4. RegisterNewCustomer: PhoneNumber", req.PhoneNumber)
-	log.Println("1.5. RegisterNewCustomer: Address", req.Address)
 
-	// 1. Dekripsi Payload Encrypted Base64 dari Frontend
+	// 1. Dekripsi Payload Encrypted dari Client
 	nikPlain, err := u.kmsService.DecryptPII(req.NIK, AAD_NIK)
 	if err != nil {
 		if plain, errFallback := u.kmsService.DecryptPII(req.NIK, "customer_pii"); errFallback == nil {
@@ -98,13 +137,33 @@ func (u *CustomerUseCase) RegisterNewCustomer(
 		}
 	}
 
-	// 2. Validasi Format Plaintext via validator/v10
 	plainDTO := dto.PlaintextRegisterCustomer{
 		NIK:         nikPlain,
 		FullName:    fullNamePlain,
 		Email:       emailPlain,
 		PhoneNumber: phonePlain,
 		Address:     addressPlain,
+	}
+
+	return u.processRegistration(ctx, plainDTO)
+}
+
+func (u *CustomerUseCase) processRegistration(
+	ctx context.Context,
+	plainDTO dto.PlaintextRegisterCustomer,
+) (*dto.RegisterCustomerResponseData, error) {
+	// Normalisasi nomor telepon lokal Indonesia ke standar internasional E.164 (+628xxxx)
+	phone := strings.TrimSpace(plainDTO.PhoneNumber)
+	phone = strings.ReplaceAll(phone, " ", "")
+	phone = strings.ReplaceAll(phone, "-", "")
+	if strings.HasPrefix(phone, "0") {
+		plainDTO.PhoneNumber = "+62" + phone[1:]
+	} else if strings.HasPrefix(phone, "62") {
+		plainDTO.PhoneNumber = "+" + phone
+	} else if !strings.HasPrefix(phone, "+") && phone != "" {
+		plainDTO.PhoneNumber = "+62" + phone
+	} else {
+		plainDTO.PhoneNumber = phone
 	}
 
 	if err := u.validate.Struct(plainDTO); err != nil {
@@ -114,7 +173,7 @@ func (u *CustomerUseCase) RegisterNewCustomer(
 	// 3. Parallel DB Uniqueness Check (Fan-Out/Fan-In via errgroup)
 	g, gCtx := errgroup.WithContext(ctx)
 
-	targetNIK := nikPlain
+	targetNIK := plainDTO.NIK
 	g.Go(func() error {
 		exists, err := u.customerRepo.ExistsByNIK(gCtx, targetNIK)
 		if err != nil {
@@ -126,7 +185,7 @@ func (u *CustomerUseCase) RegisterNewCustomer(
 		return nil
 	})
 
-	targetEmail := emailPlain
+	targetEmail := plainDTO.Email
 	g.Go(func() error {
 		exists, err := u.customerRepo.ExistsByEmail(gCtx, targetEmail)
 		if err != nil {
@@ -138,7 +197,7 @@ func (u *CustomerUseCase) RegisterNewCustomer(
 		return nil
 	})
 
-	targetPhone := phonePlain
+	targetPhone := plainDTO.PhoneNumber
 	g.Go(func() error {
 		exists, err := u.customerRepo.ExistsByPhone(gCtx, targetPhone)
 		if err != nil {
@@ -155,23 +214,23 @@ func (u *CustomerUseCase) RegisterNewCustomer(
 	}
 
 	// 4. Enkripsi Ulang PII Data Simpanan DB (Biner BYTEA murni)
-	encNIKBytes, err := u.kmsService.EncryptPII(nikPlain, AAD_NIK)
+	encNIKBytes, err := u.kmsService.EncryptPII(plainDTO.NIK, AAD_NIK)
 	if err != nil {
 		return nil, fmt.Errorf("gagal mengenkripsi NIK: %w", err)
 	}
-	encFullNameBytes, err := u.kmsService.EncryptPII(fullNamePlain, AAD_FULL_NAME)
+	encFullNameBytes, err := u.kmsService.EncryptPII(plainDTO.FullName, AAD_FULL_NAME)
 	if err != nil {
 		return nil, fmt.Errorf("gagal mengenkripsi FullName: %w", err)
 	}
-	encEmailBytes, err := u.kmsService.EncryptPII(emailPlain, AAD_EMAIL)
+	encEmailBytes, err := u.kmsService.EncryptPII(plainDTO.Email, AAD_EMAIL)
 	if err != nil {
 		return nil, fmt.Errorf("gagal mengenkripsi Email: %w", err)
 	}
-	encPhoneBytes, err := u.kmsService.EncryptPII(phonePlain, AAD_PHONE)
+	encPhoneBytes, err := u.kmsService.EncryptPII(plainDTO.PhoneNumber, AAD_PHONE)
 	if err != nil {
 		return nil, fmt.Errorf("gagal mengenkripsi Phone: %w", err)
 	}
-	encAddressBytes, err := u.kmsService.EncryptPII(addressPlain, AAD_ADDRESS)
+	encAddressBytes, err := u.kmsService.EncryptPII(plainDTO.Address, AAD_ADDRESS)
 	if err != nil {
 		return nil, fmt.Errorf("gagal mengenkripsi Address: %w", err)
 	}

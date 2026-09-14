@@ -9,6 +9,7 @@ import (
 	"customer-service/internal/delivery/http/serializer"
 	"customer-service/internal/domain"
 	"customer-service/internal/dto"
+	"customer-service/internal/security"
 	"customer-service/internal/usecase"
 
 	"github.com/gin-gonic/gin"
@@ -38,7 +39,55 @@ func (h *CustomerHandler) RegisterCustomer(c *gin.Context) {
 			return
 		}
 
-		// 2. Unpack TLV Binary Framing
+		// Pola 1: Full Raw Binary Transit Payload (Hybrid Asymmetric RSA-OAEP + AES-256-GCM >= 284 Bytes)
+		if len(bodyBytes) >= security.MinTransitPayloadSize && h.useCase.HasTransitDecryptor() {
+			res, err := h.useCase.RegisterNewCustomerRaw(c.Request.Context(), bodyBytes)
+			if err == nil {
+				c.JSON(http.StatusCreated, dto.RegisterCustomerAPIResponse{
+					Success: true,
+					Code:    http.StatusCreated,
+					Message: "Formulir pendaftaran calon nasabah berhasil diterima dengan status PENDING_VERIFICATION",
+					Data:    *res,
+				})
+				return
+			}
+
+			if errors.Is(err, domain.ErrDuplicateNIK) ||
+				errors.Is(err, domain.ErrDuplicateEmail) ||
+				errors.Is(err, domain.ErrDuplicatePhone) {
+				c.JSON(http.StatusConflict, gin.H{
+					"success": false,
+					"code":    http.StatusConflict,
+					"message": err.Error(),
+				})
+				return
+			}
+
+			if errors.Is(err, domain.ErrInvalidDecryption) {
+				// Coba fallback TLV jika payload sebenarnya TLV legacy
+				parsedReq, _, errTLV := serializer.UnpackCustomerTLV(bodyBytes)
+				if errTLV == nil && parsedReq != nil {
+					req = *parsedReq
+					goto executeUseCase
+				}
+
+				c.JSON(http.StatusBadRequest, gin.H{
+					"success": false,
+					"code":    http.StatusBadRequest,
+					"message": "Dekripsi payload gagal. Kredensial kriptografi tidak sesuai.",
+				})
+				return
+			}
+
+			c.JSON(http.StatusUnprocessableEntity, gin.H{
+				"success": false,
+				"code":    http.StatusUnprocessableEntity,
+				"message": err.Error(),
+			})
+			return
+		}
+
+		// Fallback untuk TLV Binary Framing (< 284 Bytes)
 		parsedReq, _, err := serializer.UnpackCustomerTLV(bodyBytes)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{
@@ -60,6 +109,8 @@ func (h *CustomerHandler) RegisterCustomer(c *gin.Context) {
 			return
 		}
 	}
+
+executeUseCase:
 
 	// 3. Eksekusi Register via UseCase
 	res, err := h.useCase.RegisterNewCustomer(c.Request.Context(), req)
