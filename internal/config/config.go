@@ -19,8 +19,13 @@ func LoadConfig() *Config {
 	// Read .env if present
 	loadDotEnv(".env")
 
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8085"
+	}
+
 	return &Config{
-		Port:                 os.Getenv("PORT"),
+		Port:                 port,
 		JWTSecret:            os.Getenv("JWT_SECRET"),
 		LocalKMSMasterKey:    os.Getenv("LOCAL_KMS_MASTER_KEY"),
 		DatabaseURL:          os.Getenv("DATABASE_URL"),

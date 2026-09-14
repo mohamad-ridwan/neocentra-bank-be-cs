@@ -29,13 +29,28 @@ func TestTransitDecryptor_Success(t *testing.T) {
 	}
 
 	// Decrypt
-	decryptedData, err := decryptor.DecryptRawTransitPayload(encryptedPayload)
+	decryptedData, sessionKey, err := decryptor.DecryptRawTransitPayloadWithKey(encryptedPayload)
 	if err != nil {
 		t.Fatalf("failed to decrypt transit payload: %v", err)
 	}
 
 	if !bytes.Equal(originalData, decryptedData) {
 		t.Fatalf("decrypted data mismatch: expected %s, got %s", string(originalData), string(decryptedData))
+	}
+
+	if len(sessionKey) != 32 {
+		t.Fatalf("expected sessionKey 32 bytes, got %d", len(sessionKey))
+	}
+
+	// Test EncryptTransitResponse
+	responsePlaintext := []byte("budi@example.com")
+	encResponse, err := security.EncryptTransitResponse(sessionKey, responsePlaintext)
+	if err != nil {
+		t.Fatalf("failed to encrypt transit response: %v", err)
+	}
+
+	if len(encResponse) < 12+16 {
+		t.Fatalf("response too short, expected >= 28 bytes, got %d", len(encResponse))
 	}
 }
 

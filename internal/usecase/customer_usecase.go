@@ -61,6 +61,7 @@ func (u *CustomerUseCase) HasTransitDecryptor() bool {
 
 
 // RegisterNewCustomerRaw mendekripsi raw binary transit payload (Pola 1: RSA-OAEP + AES-256-GCM)
+// dan mengenkripsi email response dengan per-request ephemeral sessionKey transit (Opsi A).
 func (u *CustomerUseCase) RegisterNewCustomerRaw(
 	ctx context.Context,
 	rawBody []byte,
@@ -69,8 +70,8 @@ func (u *CustomerUseCase) RegisterNewCustomerRaw(
 		return nil, errors.New("transit decryptor is not configured")
 	}
 
-	// 1. Dekripsi raw transit body via transitDecryptor
-	decryptedJSON, err := u.transitDecryptor.DecryptRawTransitPayload(rawBody)
+	// 1. Dekripsi raw transit body via transitDecryptor dan ekstrak sessionKey
+	decryptedJSON, sessionKey, err := u.transitDecryptor.DecryptRawTransitPayloadWithKey(rawBody)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", domain.ErrInvalidDecryption, err)
 	}
@@ -81,8 +82,21 @@ func (u *CustomerUseCase) RegisterNewCustomerRaw(
 		return nil, fmt.Errorf("format JSON hasil dekripsi tidak valid: %w", err)
 	}
 
-	// 3. Proses registrasi
-	return u.processRegistration(ctx, plainDTO)
+	// 3. Proses registrasi ke PostgreSQL (data-at-rest disimpan terenkripsi dengan Tink Keyset DB)
+	if _, err := u.processRegistration(ctx, plainDTO); err != nil {
+		return nil, err
+	}
+
+	// 4. Enkripsi email response menggunakan transit sessionKey (Shared Secret Per-Request)
+	// Output wire format: [12B IV] + [Ciphertext + 16B Tag]
+	encTransitEmail, err := security.EncryptTransitResponse(sessionKey, []byte(plainDTO.Email))
+	if err != nil {
+		return nil, fmt.Errorf("gagal mengenkripsi transit email response: %w", err)
+	}
+
+	return &dto.RegisterCustomerResponseData{
+		Email: encTransitEmail,
+	}, nil
 }
 
 func (u *CustomerUseCase) RegisterNewCustomer(
@@ -263,14 +277,8 @@ func (u *CustomerUseCase) processRegistration(
 		})
 	}
 
-	// 7. Format Response DTO (Field ciphertext biner []byte hasil simpanan DB)
+	// 7. Format Response DTO (Hanya mengembalikan Email biner []byte untuk keamanan)
 	return &dto.RegisterCustomerResponseData{
-		CustomerID:  customer.CustomerID,
-		NIK:         customer.NIK,
-		FullName:    customer.FullName,
-		Email:       customer.Email,
-		PhoneNumber: customer.PhoneNumber,
-		Status:      string(customer.Status),
-		CreatedAt:   customer.CreatedAt.Format(time.RFC3339),
+		Email: customer.Email,
 	}, nil
 }

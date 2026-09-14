@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -114,28 +115,36 @@ func (s *LocalKMSService) loadOrCreateKeyset(ctx context.Context, keyName string
 	return nil
 }
 
-// EncryptPII mengenkripsi plaintext ke biner []byte murni (Google Tink AEAD tanpa Base64 encoding)
+// EncryptPII mengenkripsi plaintext ke biner []byte murni menggunakan Google Tink Keyset dari PostgreSQL (kms_keysets)
 func (s *LocalKMSService) EncryptPII(plaintext string, aad string) ([]byte, error) {
 	s.mu.RLock()
 	aeadPrimitive := s.aead
 	s.mu.RUnlock()
 
+	if aeadPrimitive == nil {
+		return nil, errors.New("kms aead primitive is not initialized")
+	}
+
 	ciphertext, err := aeadPrimitive.Encrypt([]byte(plaintext), []byte(aad))
 	if err != nil {
-		return nil, fmt.Errorf("failed to encrypt PII: %w", err)
+		return nil, fmt.Errorf("failed to encrypt PII with database keyset: %w", err)
 	}
 	return ciphertext, nil
 }
 
-// DecryptPII mendekripsi raw biner ciphertext []byte (BYTEA) dari PostgreSQL / Client secara langsung
+// DecryptPII mendekripsi raw biner ciphertext []byte (BYTEA) dari PostgreSQL menggunakan Google Tink Keyset
 func (s *LocalKMSService) DecryptPII(ciphertext []byte, aad string) (string, error) {
 	s.mu.RLock()
 	aeadPrimitive := s.aead
 	s.mu.RUnlock()
 
+	if aeadPrimitive == nil {
+		return "", errors.New("kms aead primitive is not initialized")
+	}
+
 	plaintext, err := aeadPrimitive.Decrypt(ciphertext, []byte(aad))
 	if err != nil {
-		return "", fmt.Errorf("failed to decrypt PII: %w", err)
+		return "", fmt.Errorf("failed to decrypt PII with database keyset: %w", err)
 	}
 	return string(plaintext), nil
 }

@@ -125,8 +125,8 @@ func TestRouter_PublicRegisterWithSecurityHeaders(t *testing.T) {
 	if !resp.Success {
 		t.Errorf("expected success: true, got false")
 	}
-	if resp.Data.CustomerID != "test-cust-id-123" {
-		t.Errorf("expected CustomerID 'test-cust-id-123', got '%s'", resp.Data.CustomerID)
+	if len(resp.Data.Email) == 0 {
+		t.Errorf("expected non-empty encrypted email in response data")
 	}
 }
 
@@ -250,8 +250,8 @@ func TestRouter_PublicRegisterWithHybridEncryptionPola1(t *testing.T) {
 	if !resp.Success {
 		t.Errorf("expected success: true, got false")
 	}
-	if resp.Data.CustomerID != "test-cust-id-123" {
-		t.Errorf("expected CustomerID 'test-cust-id-123', got '%s'", resp.Data.CustomerID)
+	if len(resp.Data.Email) == 0 {
+		t.Errorf("expected non-empty encrypted email in response data")
 	}
 }
 

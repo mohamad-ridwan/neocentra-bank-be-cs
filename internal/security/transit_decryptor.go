@@ -29,15 +29,15 @@ func NewTransitDecryptor(privKey *rsa.PrivateKey) *TransitDecryptor {
 	return &TransitDecryptor{privKey: privKey}
 }
 
-// DecryptRawTransitPayload mendekripsi payload biner Pola 1:
+// DecryptRawTransitPayloadWithKey mendekripsi payload biner Pola 1 dan mengembalikan session key ephemeral
 // [ 256-Byte RSA Encrypted Key ] + [ 12-Byte IV ] + [ Ciphertext + 16-Byte Tag ]
-func (d *TransitDecryptor) DecryptRawTransitPayload(body []byte) ([]byte, error) {
+func (d *TransitDecryptor) DecryptRawTransitPayloadWithKey(body []byte) ([]byte, []byte, error) {
 	if len(body) < MinTransitPayloadSize {
-		return nil, fmt.Errorf("transit payload too short: got %d bytes, minimum required %d bytes", len(body), MinTransitPayloadSize)
+		return nil, nil, fmt.Errorf("transit payload too short: got %d bytes, minimum required %d bytes", len(body), MinTransitPayloadSize)
 	}
 
 	if d.privKey == nil {
-		return nil, errors.New("transit decryptor private key is not configured")
+		return nil, nil, errors.New("transit decryptor private key is not configured")
 	}
 
 	// 1. Slicing wire format
@@ -48,57 +48,45 @@ func (d *TransitDecryptor) DecryptRawTransitPayload(body []byte) ([]byte, error)
 	// 2. Dekripsi Ephemeral Session Key via RSA-OAEP SHA-256
 	sessionKey, err := rsa.DecryptOAEP(sha256.New(), rand.Reader, d.privKey, encKey, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to decrypt session key via RSA-OAEP: %w", err)
+		return nil, nil, fmt.Errorf("failed to decrypt session key via RSA-OAEP: %w", err)
 	}
 
 	if len(sessionKey) != 32 {
-		return nil, fmt.Errorf("invalid session key length: expected 32 bytes for AES-256, got %d", len(sessionKey))
+		return nil, nil, fmt.Errorf("invalid session key length: expected 32 bytes for AES-256, got %d", len(sessionKey))
 	}
 
 	// 3. Dekripsi Ciphertext via AES-256-GCM
 	block, err := aes.NewCipher(sessionKey)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create AES cipher: %w", err)
+		return nil, nil, fmt.Errorf("failed to create AES cipher: %w", err)
 	}
 
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create GCM block: %w", err)
+		return nil, nil, fmt.Errorf("failed to create GCM block: %w", err)
 	}
 
 	plaintext, err := gcm.Open(nil, iv, ciphertextWithTag, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to decrypt AES-GCM ciphertext: %w", err)
+		return nil, nil, fmt.Errorf("failed to decrypt AES-GCM ciphertext: %w", err)
 	}
 
-	return plaintext, nil
+	return plaintext, sessionKey, nil
 }
 
-// EncryptRawTransitPayload mengenkripsi plaintext biner menggunakan skema Hybrid RSA-OAEP + AES-256-GCM (Pola 1)
-func EncryptRawTransitPayload(pubKey *rsa.PublicKey, plaintext []byte) ([]byte, error) {
-	if pubKey == nil {
-		return nil, errors.New("public key cannot be nil")
+// DecryptRawTransitPayload mendekripsi payload biner Pola 1
+func (d *TransitDecryptor) DecryptRawTransitPayload(body []byte) ([]byte, error) {
+	plaintext, _, err := d.DecryptRawTransitPayloadWithKey(body)
+	return plaintext, err
+}
+
+// EncryptTransitResponse mengenkripsi data response menggunakan ephemeral sessionKey yang dikirim mobile
+// Format output wire: [ 12-Byte IV ] + [ Ciphertext + 16-Byte Tag ]
+func EncryptTransitResponse(sessionKey []byte, plaintext []byte) ([]byte, error) {
+	if len(sessionKey) != 32 {
+		return nil, fmt.Errorf("invalid session key length: expected 32 bytes, got %d", len(sessionKey))
 	}
 
-	// 1. Generate 32-byte ephemeral AES-256 session key
-	sessionKey := make([]byte, 32)
-	if _, err := io.ReadFull(rand.Reader, sessionKey); err != nil {
-		return nil, fmt.Errorf("failed to generate random session key: %w", err)
-	}
-
-	// 2. Enkripsi session key dengan RSA-OAEP SHA-256 (256 bytes)
-	encKey, err := rsa.EncryptOAEP(sha256.New(), rand.Reader, pubKey, sessionKey, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to encrypt session key with RSA-OAEP: %w", err)
-	}
-
-	// 3. Generate 12-byte IV untuk AES-GCM
-	iv := make([]byte, GCMNonceLength)
-	if _, err := io.ReadFull(rand.Reader, iv); err != nil {
-		return nil, fmt.Errorf("failed to generate IV: %w", err)
-	}
-
-	// 4. Enkripsi plaintext dengan AES-256-GCM (hasilnya: ciphertext + 16-byte tag)
 	block, err := aes.NewCipher(sessionKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create AES cipher: %w", err)
@@ -107,6 +95,55 @@ func EncryptRawTransitPayload(pubKey *rsa.PublicKey, plaintext []byte) ([]byte, 
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create GCM block: %w", err)
+	}
+
+	iv := make([]byte, GCMNonceLength)
+	if _, err := io.ReadFull(rand.Reader, iv); err != nil {
+		return nil, fmt.Errorf("failed to generate random IV: %w", err)
+	}
+
+	ciphertextWithTag := gcm.Seal(nil, iv, plaintext, nil)
+
+	responseBytes := make([]byte, 0, len(iv)+len(ciphertextWithTag))
+	responseBytes = append(responseBytes, iv...)
+	responseBytes = append(responseBytes, ciphertextWithTag...)
+
+	return responseBytes, nil
+}
+
+// EncryptRawTransitPayloadWithKey mengenkripsi plaintext biner dan mengembalikan session key ephemeral
+func EncryptRawTransitPayloadWithKey(pubKey *rsa.PublicKey, plaintext []byte) ([]byte, []byte, error) {
+	if pubKey == nil {
+		return nil, nil, errors.New("public key cannot be nil")
+	}
+
+	// 1. Generate 32-byte ephemeral AES-256 session key
+	sessionKey := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, sessionKey); err != nil {
+		return nil, nil, fmt.Errorf("failed to generate random session key: %w", err)
+	}
+
+	// 2. Enkripsi session key dengan RSA-OAEP SHA-256 (256 bytes)
+	encKey, err := rsa.EncryptOAEP(sha256.New(), rand.Reader, pubKey, sessionKey, nil)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to encrypt session key with RSA-OAEP: %w", err)
+	}
+
+	// 3. Generate 12-byte IV untuk AES-GCM
+	iv := make([]byte, GCMNonceLength)
+	if _, err := io.ReadFull(rand.Reader, iv); err != nil {
+		return nil, nil, fmt.Errorf("failed to generate IV: %w", err)
+	}
+
+	// 4. Enkripsi plaintext dengan AES-256-GCM (hasilnya: ciphertext + 16-byte tag)
+	block, err := aes.NewCipher(sessionKey)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create AES cipher: %w", err)
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create GCM block: %w", err)
 	}
 
 	ciphertextWithTag := gcm.Seal(nil, iv, plaintext, nil)
@@ -117,7 +154,13 @@ func EncryptRawTransitPayload(pubKey *rsa.PublicKey, plaintext []byte) ([]byte, 
 	payload = append(payload, iv...)
 	payload = append(payload, ciphertextWithTag...)
 
-	return payload, nil
+	return payload, sessionKey, nil
+}
+
+// EncryptRawTransitPayload mengenkripsi plaintext biner menggunakan skema Hybrid RSA-OAEP + AES-256-GCM (Pola 1)
+func EncryptRawTransitPayload(pubKey *rsa.PublicKey, plaintext []byte) ([]byte, error) {
+	payload, _, err := EncryptRawTransitPayloadWithKey(pubKey, plaintext)
+	return payload, err
 }
 
 // GenerateRSAKeyPair menghasilkan pasangan kunci RSA-2048 baru

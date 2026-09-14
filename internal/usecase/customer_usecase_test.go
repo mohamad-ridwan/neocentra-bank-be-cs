@@ -2,6 +2,8 @@ package usecase_test
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
 	"strings"
 	"testing"
 	"time"
@@ -89,12 +91,17 @@ func TestCustomerUseCase_RegisterNewCustomer(t *testing.T) {
 		t.Fatalf("expected successful registration, got err: %v", err)
 	}
 
-	if resp.CustomerID != "mock-uuid-1234-5678" {
-		t.Errorf("expected customer id mock-uuid-1234-5678, got %s", resp.CustomerID)
+	if len(resp.Email) == 0 {
+		t.Errorf("expected non-empty encrypted email bytes in response")
 	}
 
-	if resp.Status != string(domain.StatusPendingVerification) {
-		t.Errorf("expected status PENDING_VERIFICATION, got %s", resp.Status)
+	savedCust := custRepo.customers["mock-uuid-1234-5678"]
+	if savedCust == nil {
+		t.Fatalf("expected customer to be saved in repository")
+	}
+
+	if savedCust.Status != domain.StatusPendingVerification {
+		t.Errorf("expected status PENDING_VERIFICATION, got %s", savedCust.Status)
 	}
 
 	// 2. Duplicate Registration Test
@@ -144,7 +151,7 @@ func TestCustomerUseCase_RegisterNewCustomerRaw_HybridEncryption(t *testing.T) {
 	}`)
 
 	// Encrypt using hybrid RSA-OAEP + AES-256-GCM (Pola 1)
-	encryptedRawBody, err := security.EncryptRawTransitPayload(pubKey, customerJSON)
+	encryptedRawBody, sessionKey, err := security.EncryptRawTransitPayloadWithKey(pubKey, customerJSON)
 	if err != nil {
 		t.Fatalf("failed to encrypt hybrid payload: %v", err)
 	}
@@ -157,18 +164,40 @@ func TestCustomerUseCase_RegisterNewCustomerRaw_HybridEncryption(t *testing.T) {
 		t.Fatalf("expected successful raw registration, got: %v", err)
 	}
 
-	if resp.CustomerID != "mock-uuid-1234-5678" {
-		t.Errorf("expected customer id mock-uuid-1234-5678, got %s", resp.CustomerID)
+	if len(resp.Email) == 0 {
+		t.Errorf("expected non-empty encrypted email bytes in response")
 	}
 
-	if resp.Status != string(domain.StatusPendingVerification) {
-		t.Errorf("expected status PENDING_VERIFICATION, got %s", resp.Status)
+	// Verify that response email can be decrypted with sessionKey (Option A: Transit Shared Secret)
+	if len(resp.Email) < 28 {
+		t.Fatalf("expected response email length >= 28 bytes, got %d", len(resp.Email))
+	}
+	block, err := aes.NewCipher(sessionKey)
+	if err != nil {
+		t.Fatalf("failed to create cipher: %v", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		t.Fatalf("failed to create gcm: %v", err)
+	}
+	iv := resp.Email[:12]
+	ct := resp.Email[12:]
+	decEmailBytes, err := gcm.Open(nil, iv, ct, nil)
+	if err != nil {
+		t.Fatalf("failed to decrypt response email with sessionKey: %v", err)
+	}
+	if string(decEmailBytes) != "siti.nurhaliza@example.com" {
+		t.Errorf("expected decrypted response email siti.nurhaliza@example.com, got %s", string(decEmailBytes))
 	}
 
 	// Verify that the stored customer in repo was encrypted using Tink KMS Keyset
-	savedCust := custRepo.customers[resp.CustomerID]
+	savedCust := custRepo.customers["mock-uuid-1234-5678"]
 	if savedCust == nil {
 		t.Fatal("expected customer to be saved in repository")
+	}
+
+	if savedCust.Status != domain.StatusPendingVerification {
+		t.Errorf("expected status PENDING_VERIFICATION, got %s", savedCust.Status)
 	}
 
 	// Decrypt using KMS service to verify data-at-rest Tink preservation
@@ -226,7 +255,11 @@ func TestCustomerUseCase_PhoneNumberNormalization_LocalFormat(t *testing.T) {
 		t.Fatalf("expected successful registration with local phone number, got error: %v", err)
 	}
 
-	savedCust := custRepo.customers[resp.CustomerID]
+	if len(resp.Email) == 0 {
+		t.Errorf("expected non-empty encrypted email bytes in response")
+	}
+
+	savedCust := custRepo.customers["mock-uuid-1234-5678"]
 	if savedCust == nil {
 		t.Fatal("expected customer to be saved")
 	}
