@@ -40,6 +40,9 @@ func SetupRouter(custHandler *handler.CustomerHandler, rdb *redis.Client) *gin.E
 			public.POST("/customers/register", custHandler.RegisterCustomer)
 		}
 
+		// Public Verification Endpoint (Direct JSON payload { verificationToken, code })
+		v1.POST("/customers/verification", custHandler.VerifyCustomer)
+
 		// 2. PROTECTED ROUTES (Wajib User JWT Terverifikasi)
 		protected := v1.Group("")
 		protected.Use(middleware.JWTAuthMiddleware())

@@ -182,3 +182,19 @@ func (r *CustomerRepository) ExistsByPhone(ctx context.Context, phone string) (b
 
 	return false, nil
 }
+
+func (r *CustomerRepository) UpdateCustomerStatus(ctx context.Context, customerID string, status domain.CustomerStatus) error {
+	query := `
+		UPDATE customers
+		SET status = $1, updated_at = CURRENT_TIMESTAMP
+		WHERE customer_id = $2
+	`
+	tag, err := r.pool.Exec(ctx, query, string(status), customerID)
+	if err != nil {
+		return fmt.Errorf("failed to update customer status: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("customer with ID %s not found", customerID)
+	}
+	return nil
+}

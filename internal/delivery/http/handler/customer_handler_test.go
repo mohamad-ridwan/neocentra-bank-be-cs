@@ -2,6 +2,7 @@ package handler_test
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -11,22 +12,19 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	delivery "customer-service/internal/delivery/http"
 	"customer-service/internal/delivery/http/handler"
-	"customer-service/internal/delivery/http/middleware"
 	"customer-service/internal/delivery/http/serializer"
 	"customer-service/internal/domain"
 	"customer-service/internal/dto"
 	"customer-service/internal/security"
 	"customer-service/internal/usecase"
-
-	"context"
 )
 
-// Mock customer repository
 type mockCustRepo struct {
 	customers map[string]*domain.Customer
 }
@@ -43,6 +41,48 @@ func (m *mockCustRepo) ExistsByPhone(ctx context.Context, phone string) (bool, e
 func (m *mockCustRepo) CreateCustomer(ctx context.Context, customer *domain.Customer) error {
 	customer.CustomerID = "test-cust-id-123"
 	customer.CreatedAt = time.Now()
+	return nil
+}
+func (m *mockCustRepo) UpdateCustomerStatus(ctx context.Context, customerID string, status domain.CustomerStatus) error {
+	return nil
+}
+
+type mockVerifRepo struct {
+	verifications map[string]*domain.Verification
+}
+
+func (m *mockVerifRepo) CreateVerification(ctx context.Context, v *domain.Verification) error {
+	v.VerificationID = "verif-id-123"
+	if m.verifications == nil {
+		m.verifications = make(map[string]*domain.Verification)
+	}
+	m.verifications[v.VerificationID] = v
+	return nil
+}
+func (m *mockVerifRepo) FindVerification(ctx context.Context, verificationID string, customerID string, code int) (*domain.Verification, error) {
+	v, ok := m.verifications[verificationID]
+	if !ok || v.CustomerID != customerID || v.Code != code {
+		return nil, domain.ErrVerificationNotFound
+	}
+	return v, nil
+}
+func (m *mockVerifRepo) DeleteVerification(ctx context.Context, verificationID string) error {
+	delete(m.verifications, verificationID)
+	return nil
+}
+
+type mockMailSvc struct{}
+
+func (m *mockMailSvc) SendVerificationCode(ctx context.Context, toEmail, customerName string, code int) error {
+	return nil
+}
+
+type mockEmailVal struct{}
+
+func (m *mockEmailVal) ValidateGoogleEmail(ctx context.Context, email string) error {
+	if strings.Contains(email, "invalid") {
+		return domain.ErrInvalidEmailGoogle
+	}
 	return nil
 }
 
@@ -68,24 +108,27 @@ func generateSignature(method, path string, body []byte, timestamp, nonce string
 	bodySha := sha256.Sum256(body)
 	bodyHashHex := hex.EncodeToString(bodySha[:])
 	stringToSign := fmt.Sprintf("%s:%s:%s:%s:%s", method, path, bodyHashHex, timestamp, nonce)
-	mac := hmac.New(sha256.New, []byte(middleware.DefaultAppSigningKey))
+
+	signingKey := "neocentra_app_signature_key_2026"
+	mac := hmac.New(sha256.New, []byte(signingKey))
 	mac.Write([]byte(stringToSign))
 	return base64.StdEncoding.EncodeToString(mac.Sum(nil))
 }
 
-func TestRouter_PublicRegisterWithSecurityHeaders(t *testing.T) {
-	// Setup KMS & UseCase
+func TestRouter_RegisterCustomer_Success(t *testing.T) {
+	kmsRepo := mockRepo()
 	masterKey := "neocentra_mock_master_key_for_testing_32bytes!"
-	kmsService, err := usecase.NewLocalKMSService(masterKey, nil)
+	kmsService, err := usecase.NewLocalKMSService(masterKey, kmsRepo)
 	if err != nil {
 		t.Fatalf("failed to init KMS: %v", err)
 	}
 
 	repo := &mockCustRepo{customers: make(map[string]*domain.Customer)}
+	verifRepo := &mockVerifRepo{verifications: make(map[string]*domain.Verification)}
 	wp := usecase.NewWorkerPool(2, 10)
 	defer wp.Shutdown(context.Background())
 
-	uc := usecase.NewCustomerUseCase(repo, kmsService, wp)
+	uc := usecase.NewCustomerUseCase(repo, kmsService, wp, verifRepo, &mockMailSvc{}, &mockEmailVal{}, "jwt-secret")
 	custHandler := handler.NewCustomerHandler(uc)
 	router := delivery.SetupRouter(custHandler, nil)
 
@@ -126,7 +169,24 @@ func TestRouter_PublicRegisterWithSecurityHeaders(t *testing.T) {
 		t.Errorf("expected success: true, got false")
 	}
 	if len(resp.Data.Email) == 0 {
-		t.Errorf("expected non-empty encrypted email in response data")
+		t.Errorf("expected non-empty masked email in response data")
+	}
+	if len(resp.Data.VerificationToken) == 0 {
+		t.Errorf("expected non-empty verificationToken in response data")
+	}
+
+	// Test Verify Customer Endpoint
+	verifReqBody, _ := json.Marshal(dto.VerifyCustomerRequest{
+		VerificationToken: resp.Data.VerificationToken,
+		Code:              fmt.Sprintf("%05d", verifRepo.verifications["verif-id-123"].Code),
+	})
+	vReq, _ := http.NewRequest("POST", "/api/v1/customers/verification", bytes.NewReader(verifReqBody))
+	vReq.Header.Set("Content-Type", "application/json")
+	vRec := httptest.NewRecorder()
+	router.ServeHTTP(vRec, vReq)
+
+	if vRec.Code != http.StatusOK {
+		t.Fatalf("expected verification status 200 OK, got %d. Body: %s", vRec.Code, vRec.Body.String())
 	}
 }
 
@@ -134,12 +194,11 @@ func TestRouter_RejectExpiredTimestamp(t *testing.T) {
 	repo := &mockCustRepo{customers: make(map[string]*domain.Customer)}
 	masterKey := "neocentra_mock_master_key_for_testing_32bytes!"
 	kmsService, _ := usecase.NewLocalKMSService(masterKey, nil)
-	uc := usecase.NewCustomerUseCase(repo, kmsService, nil)
+	uc := usecase.NewCustomerUseCase(repo, kmsService, nil, &mockVerifRepo{}, &mockMailSvc{}, &mockEmailVal{}, "jwt-secret")
 	custHandler := handler.NewCustomerHandler(uc)
 	router := delivery.SetupRouter(custHandler, nil)
 
 	tlvBody := []byte("dummy")
-	// Timestamp 5 minutes ago (outside 60s skew window)
 	expiredTimestamp := time.Now().Add(-5 * time.Minute).UTC().Format(time.RFC3339)
 	nonce := "test-nonce"
 	path := "/api/v1/customers/register"
@@ -163,7 +222,7 @@ func TestRouter_RejectInvalidSignature(t *testing.T) {
 	repo := &mockCustRepo{customers: make(map[string]*domain.Customer)}
 	masterKey := "neocentra_mock_master_key_for_testing_32bytes!"
 	kmsService, _ := usecase.NewLocalKMSService(masterKey, nil)
-	uc := usecase.NewCustomerUseCase(repo, kmsService, nil)
+	uc := usecase.NewCustomerUseCase(repo, kmsService, nil, &mockVerifRepo{}, &mockMailSvc{}, &mockEmailVal{}, "jwt-secret")
 	custHandler := handler.NewCustomerHandler(uc)
 	router := delivery.SetupRouter(custHandler, nil)
 
@@ -187,7 +246,6 @@ func TestRouter_RejectInvalidSignature(t *testing.T) {
 }
 
 func TestRouter_PublicRegisterWithHybridEncryptionPola1(t *testing.T) {
-	// Setup KMS, TransitDecryptor & UseCase
 	masterKey := "neocentra_mock_master_key_for_testing_32bytes!"
 	kmsService, err := usecase.NewLocalKMSService(masterKey, nil)
 	if err != nil {
@@ -201,10 +259,11 @@ func TestRouter_PublicRegisterWithHybridEncryptionPola1(t *testing.T) {
 	transitDec := security.NewTransitDecryptor(privKey)
 
 	repo := &mockCustRepo{customers: make(map[string]*domain.Customer)}
+	verifRepo := &mockVerifRepo{verifications: make(map[string]*domain.Verification)}
 	wp := usecase.NewWorkerPool(2, 10)
 	defer wp.Shutdown(context.Background())
 
-	uc := usecase.NewCustomerUseCase(repo, kmsService, wp, transitDec)
+	uc := usecase.NewCustomerUseCase(repo, kmsService, wp, verifRepo, &mockMailSvc{}, &mockEmailVal{}, "jwt-secret", transitDec)
 	custHandler := handler.NewCustomerHandler(uc)
 	router := delivery.SetupRouter(custHandler, nil)
 
@@ -217,7 +276,6 @@ func TestRouter_PublicRegisterWithHybridEncryptionPola1(t *testing.T) {
 		"password": "SecurePassword123!"
 	}`)
 
-	// Encrypt using hybrid RSA-OAEP + AES-256-GCM (Pola 1)
 	rawBody, err := security.EncryptRawTransitPayload(pubKey, customerJSON)
 	if err != nil {
 		t.Fatalf("failed to encrypt hybrid payload: %v", err)
@@ -251,7 +309,31 @@ func TestRouter_PublicRegisterWithHybridEncryptionPola1(t *testing.T) {
 		t.Errorf("expected success: true, got false")
 	}
 	if len(resp.Data.Email) == 0 {
-		t.Errorf("expected non-empty encrypted email in response data")
+		t.Errorf("expected non-empty email in response data")
+	}
+	if len(resp.Data.VerificationToken) == 0 {
+		t.Errorf("expected non-empty verificationToken in response data")
 	}
 }
 
+type mockKmsRepo struct{}
+
+func mockRepo() *mockKmsRepo {
+	return &mockKmsRepo{}
+}
+func (m *mockKmsRepo) SaveEncryptedKeyset(ctx context.Context, keyName string, encryptedKeyset []byte) error {
+	return nil
+}
+func (m *mockKmsRepo) GetEncryptedKeyset(ctx context.Context, keyName string) ([]byte, error) {
+	return nil, nil
+}
+
+func (m *mockKmsRepo) GetKeysetByName(ctx context.Context, keyName string) ([]byte, int, error) {
+	return nil, 0, nil
+}
+func (m *mockKmsRepo) SaveKeyset(ctx context.Context, keyName string, encryptedKeyset []byte, primaryKeyID uint32, version int) error {
+	return nil
+}
+func (m *mockKmsRepo) UpdateKeyset(ctx context.Context, keyName string, encryptedKeyset []byte, primaryKeyID uint32, version int) error {
+	return nil
+}

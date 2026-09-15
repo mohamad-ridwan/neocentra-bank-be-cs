@@ -16,6 +16,7 @@ import (
 	"customer-service/internal/delivery/http/handler"
 	"customer-service/internal/repository/postgres"
 	"customer-service/internal/security"
+	"customer-service/internal/service"
 	"customer-service/internal/usecase"
 	"customer-service/pkg/database"
 )
@@ -37,6 +38,9 @@ func main() {
 	} else {
 		defer dbPool.Close()
 		log.Println("[INFO] PostgreSQL connection pool initialized successfully.")
+		if err := database.AutoMigrate(ctx, dbPool); err != nil {
+			log.Printf("[WARNING] Database AutoMigrate failed: %v", err)
+		}
 	}
 
 	// 3. Initialize Redis Client
@@ -66,12 +70,16 @@ func main() {
 	defer cancelKMSWorker()
 	kmsService.StartRotationWorker(kmsWorkerCtx, "customer_pii_keyset", 90*24*time.Hour)
 
-	// 5. Initialize Repository, WorkerPool, Transit Decryptor & UseCase
+	// 5. Initialize Repositories, Services, WorkerPool & Transit Decryptor
 	var custRepo usecase.CustomerRepository
+	var verificationRepo usecase.VerificationRepository
 	if dbPool != nil {
 		custRepo = postgres.NewCustomerRepository(dbPool, kmsService)
+		verificationRepo = postgres.NewVerificationRepository(dbPool)
 	}
 
+	mailService := service.NewMailService()
+	emailValidator := service.NewGoogleEmailValidator()
 	workerPool := usecase.NewWorkerPool(5, 100)
 
 	var transitDecryptor *security.TransitDecryptor
@@ -94,7 +102,16 @@ func main() {
 		}
 	}
 
-	custUseCase := usecase.NewCustomerUseCase(custRepo, kmsService, workerPool, transitDecryptor)
+	custUseCase := usecase.NewCustomerUseCase(
+		custRepo,
+		kmsService,
+		workerPool,
+		verificationRepo,
+		mailService,
+		emailValidator,
+		cfg.JWTSecret,
+		transitDecryptor,
+	)
 
 	// 6. Initialize Delivery Layer (Handler & Router)
 	custHandler := handler.NewCustomerHandler(custUseCase)

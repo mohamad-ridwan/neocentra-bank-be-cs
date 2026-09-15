@@ -1,7 +1,8 @@
 package dto
 
 type RegisterCustomerResponseData struct {
-	Email []byte `json:"email"` // Ciphertext biner (BYTEA) terenkripsi KMS
+	VerificationToken string `json:"verificationToken"`
+	Email             string `json:"email"` // Masked email (e.g. u***r@example.co)
 }
 
 type RegisterCustomerAPIResponse struct {

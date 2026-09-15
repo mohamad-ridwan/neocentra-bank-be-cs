@@ -11,4 +11,5 @@ type CustomerRepository interface {
 	ExistsByNIK(ctx context.Context, nik string) (bool, error)
 	ExistsByEmail(ctx context.Context, email string) (bool, error)
 	ExistsByPhone(ctx context.Context, phone string) (bool, error)
+	UpdateCustomerStatus(ctx context.Context, customerID string, status domain.CustomerStatus) error
 }

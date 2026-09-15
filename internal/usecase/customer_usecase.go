@@ -2,16 +2,20 @@ package usecase
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"math/big"
 	"strings"
 	"time"
 
 	"customer-service/internal/domain"
 	"customer-service/internal/dto"
 	"customer-service/internal/security"
+	"customer-service/internal/service"
+	"customer-service/internal/util"
 
 	"github.com/go-playground/validator/v10"
 	"golang.org/x/sync/errgroup"
@@ -27,23 +31,35 @@ const (
 
 type CustomerUseCase struct {
 	customerRepo     CustomerRepository
+	verificationRepo VerificationRepository
+	mailService      service.MailService
+	emailValidator   service.GoogleEmailValidator
 	kmsService       *LocalKMSService
 	workerPool       *WorkerPool
 	validate         *validator.Validate
 	transitDecryptor *security.TransitDecryptor
+	jwtSecret        string
 }
 
 func NewCustomerUseCase(
 	repo CustomerRepository,
 	kms *LocalKMSService,
 	wp *WorkerPool,
+	verificationRepo VerificationRepository,
+	mailSvc service.MailService,
+	emailValidator service.GoogleEmailValidator,
+	jwtSecret string,
 	transitDec ...*security.TransitDecryptor,
 ) *CustomerUseCase {
 	uc := &CustomerUseCase{
-		customerRepo: repo,
-		kmsService:   kms,
-		workerPool:   wp,
-		validate:     validator.New(),
+		customerRepo:     repo,
+		verificationRepo: verificationRepo,
+		mailService:      mailSvc,
+		emailValidator:   emailValidator,
+		kmsService:       kms,
+		workerPool:       wp,
+		validate:         validator.New(),
+		jwtSecret:        jwtSecret,
 	}
 	if len(transitDec) > 0 && transitDec[0] != nil {
 		uc.transitDecryptor = transitDec[0]
@@ -59,9 +75,7 @@ func (u *CustomerUseCase) HasTransitDecryptor() bool {
 	return u.transitDecryptor != nil
 }
 
-
 // RegisterNewCustomerRaw mendekripsi raw binary transit payload (Pola 1: RSA-OAEP + AES-256-GCM)
-// dan mengenkripsi email response dengan per-request ephemeral sessionKey transit (Opsi A).
 func (u *CustomerUseCase) RegisterNewCustomerRaw(
 	ctx context.Context,
 	rawBody []byte,
@@ -71,7 +85,7 @@ func (u *CustomerUseCase) RegisterNewCustomerRaw(
 	}
 
 	// 1. Dekripsi raw transit body via transitDecryptor dan ekstrak sessionKey
-	decryptedJSON, sessionKey, err := u.transitDecryptor.DecryptRawTransitPayloadWithKey(rawBody)
+	decryptedJSON, _, err := u.transitDecryptor.DecryptRawTransitPayloadWithKey(rawBody)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", domain.ErrInvalidDecryption, err)
 	}
@@ -82,21 +96,8 @@ func (u *CustomerUseCase) RegisterNewCustomerRaw(
 		return nil, fmt.Errorf("format JSON hasil dekripsi tidak valid: %w", err)
 	}
 
-	// 3. Proses registrasi ke PostgreSQL (data-at-rest disimpan terenkripsi dengan Tink Keyset DB)
-	if _, err := u.processRegistration(ctx, plainDTO); err != nil {
-		return nil, err
-	}
-
-	// 4. Enkripsi email response menggunakan transit sessionKey (Shared Secret Per-Request)
-	// Output wire format: [12B IV] + [Ciphertext + 16B Tag]
-	encTransitEmail, err := security.EncryptTransitResponse(sessionKey, []byte(plainDTO.Email))
-	if err != nil {
-		return nil, fmt.Errorf("gagal mengenkripsi transit email response: %w", err)
-	}
-
-	return &dto.RegisterCustomerResponseData{
-		Email: encTransitEmail,
-	}, nil
+	// 3. Proses registrasi ke PostgreSQL
+	return u.processRegistration(ctx, plainDTO)
 }
 
 func (u *CustomerUseCase) RegisterNewCustomer(
@@ -184,6 +185,13 @@ func (u *CustomerUseCase) processRegistration(
 		return nil, fmt.Errorf("validasi format data gagal: %w", err)
 	}
 
+	// 2. Validasi Akun Email Google Sebelum Menyimpan Data ke Database
+	if u.emailValidator != nil {
+		if err := u.emailValidator.ValidateGoogleEmail(ctx, plainDTO.Email); err != nil {
+			return nil, domain.ErrInvalidEmailGoogle
+		}
+	}
+
 	// 3. Parallel DB Uniqueness Check (Fan-Out/Fan-In via errgroup)
 	g, gCtx := errgroup.WithContext(ctx)
 
@@ -263,7 +271,37 @@ func (u *CustomerUseCase) processRegistration(
 		return nil, fmt.Errorf("gagal menyimpan data nasabah ke database: %w", err)
 	}
 
-	// 6. Enqueue Background Task ke Worker Pool (Non-blocking)
+	// 6. Generate 5-Digit Verification Code (10000 - 99999) & Simpan ke Table Verifications
+	var verificationID string
+	if u.verificationRepo != nil {
+		// Generate cryptographic 5-digit number
+		codeBig, err := rand.Int(rand.Reader, big.NewInt(90000))
+		codeInt := 10000
+		if err == nil {
+			codeInt = int(codeBig.Int64()) + 10000
+		}
+
+		verification := &domain.Verification{
+			CustomerID:       customer.CustomerID,
+			VerificationType: "EMAIL_REGISTRATION",
+			Code:             codeInt,
+			ExpiresAt:        time.Now().Add(1 * time.Minute),
+		}
+
+		if err := u.verificationRepo.CreateVerification(ctx, verification); err != nil {
+			return nil, fmt.Errorf("gagal menyimpan kode verifikasi: %w", err)
+		}
+		verificationID = verification.VerificationID
+
+		// 7. Kirim Email 5-Digit Kode Verifikasi via wneessen/go-mail
+		if u.mailService != nil {
+			go func(toEmail, name string, code int) {
+				_ = u.mailService.SendVerificationCode(context.Background(), toEmail, name, code)
+			}(plainDTO.Email, plainDTO.FullName, codeInt)
+		}
+	}
+
+	// 8. Enqueue Background Task ke Worker Pool (Non-blocking)
 	if u.workerPool != nil {
 		u.workerPool.Enqueue(AsyncTaskJob{
 			Type:       TaskTypeAuditLog,
@@ -277,8 +315,61 @@ func (u *CustomerUseCase) processRegistration(
 		})
 	}
 
-	// 7. Format Response DTO (Hanya mengembalikan Email biner []byte untuk keamanan)
+	// 9. Generate JWT verificationToken dengan durasi 1 menit
+	jwtToken, err := security.GenerateVerificationToken(customer.CustomerID, verificationID, u.jwtSecret, 1*time.Minute)
+	if err != nil {
+		return nil, fmt.Errorf("gagal membuat verification token: %w", err)
+	}
+
+	// 10. Samarkan Email Response (misalnya u***r@example.co)
+	maskedEmail := util.MaskEmail(plainDTO.Email)
+
 	return &dto.RegisterCustomerResponseData{
-		Email: customer.Email,
+		VerificationToken: jwtToken,
+		Email:             maskedEmail,
+	}, nil
+}
+
+func (u *CustomerUseCase) VerifyCustomer(ctx context.Context, req dto.VerifyCustomerRequest) (*dto.VerifyCustomerResponse, error) {
+	if u.verificationRepo == nil {
+		return nil, errors.New("layanan verifikasi belum dikonfigurasi")
+	}
+
+	// 1. Ekstrak dan validasi JWT Verification Token
+	claims, err := security.ParseVerificationToken(req.VerificationToken, u.jwtSecret)
+	if err != nil {
+		return nil, err
+	}
+
+	// 2. Parse 5-digit code string to int
+	var codeInt int
+	_, err = fmt.Sscanf(req.Code, "%d", &codeInt)
+	if err != nil || codeInt < 10000 || codeInt > 99999 {
+		return nil, domain.ErrVerificationNotFound
+	}
+
+	// 3. Cari entri di tabel verifications berdasarkan {customer_id, verification_id, code}
+	v, err := u.verificationRepo.FindVerification(ctx, claims.VerificationID, claims.CustomerID, codeInt)
+	if err != nil {
+		return nil, domain.ErrVerificationNotFound
+	}
+
+	// 4. Periksa apakah waktu kadaluarsa sudah lewat (1 menit)
+	if time.Now().After(v.ExpiresAt) {
+		_ = u.verificationRepo.DeleteVerification(ctx, v.VerificationID)
+		return nil, domain.ErrVerificationExpired
+	}
+
+	// 5. Hapus row verifikasi dari tabel verifications agar tidak menjadi spam/reusable
+	_ = u.verificationRepo.DeleteVerification(ctx, v.VerificationID)
+
+	// 6. Update status customer menjadi ACTIVE
+	if err := u.customerRepo.UpdateCustomerStatus(ctx, claims.CustomerID, domain.StatusActive); err != nil {
+		return nil, fmt.Errorf("gagal mengaktifkan akun nasabah: %w", err)
+	}
+
+	return &dto.VerifyCustomerResponse{
+		Success: true,
+		Message: "Akun anda berhasil di verifikasi",
 	}, nil
 }

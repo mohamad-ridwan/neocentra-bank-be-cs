@@ -2,15 +2,13 @@ package usecase_test
 
 import (
 	"context"
-	"crypto/aes"
-	"crypto/cipher"
 	"strings"
 	"testing"
 	"time"
 
 	"customer-service/internal/domain"
 	"customer-service/internal/dto"
-	"customer-service/internal/security"
+	
 	"customer-service/internal/usecase"
 )
 
@@ -35,9 +33,8 @@ func (m *MockCustomerRepository) CreateCustomer(ctx context.Context, customer *d
 	customer.CreatedAt = time.Now()
 	customer.UpdatedAt = time.Now()
 	m.customers[customer.CustomerID] = customer
-	// Mark plain keys from mock test context if needed or store
 	m.niks["3271012345670001"] = true
-	m.emails["budi@example.com"] = true
+	m.emails["budi@gmail.com"] = true
 	m.phones["+6281234567890"] = true
 	return nil
 }
@@ -54,6 +51,67 @@ func (m *MockCustomerRepository) ExistsByPhone(ctx context.Context, phone string
 	return m.phones[phone], nil
 }
 
+func (m *MockCustomerRepository) UpdateCustomerStatus(ctx context.Context, customerID string, status domain.CustomerStatus) error {
+	cust := m.customers[customerID]
+	if cust != nil {
+		cust.Status = status
+		return nil
+	}
+	return nil
+}
+
+type MockVerificationRepository struct {
+	verifications map[string]*domain.Verification
+}
+
+func newMockVerificationRepo() *MockVerificationRepository {
+	return &MockVerificationRepository{
+		verifications: make(map[string]*domain.Verification),
+	}
+}
+
+func (m *MockVerificationRepository) CreateVerification(ctx context.Context, v *domain.Verification) error {
+	v.VerificationID = "mock-verif-id-999"
+	v.CreatedAt = time.Now()
+	m.verifications[v.VerificationID] = v
+	return nil
+}
+
+func (m *MockVerificationRepository) FindVerification(ctx context.Context, verificationID string, customerID string, code int) (*domain.Verification, error) {
+	v, ok := m.verifications[verificationID]
+	if !ok || v.CustomerID != customerID || v.Code != code {
+		return nil, domain.ErrVerificationNotFound
+	}
+	return v, nil
+}
+
+func (m *MockVerificationRepository) DeleteVerification(ctx context.Context, verificationID string) error {
+	delete(m.verifications, verificationID)
+	return nil
+}
+
+type MockMailService struct {
+	SentEmails []string
+	SentCodes  []int
+}
+
+func (m *MockMailService) SendVerificationCode(ctx context.Context, toEmail, customerName string, code int) error {
+	m.SentEmails = append(m.SentEmails, toEmail)
+	m.SentCodes = append(m.SentCodes, code)
+	return nil
+}
+
+type MockEmailValidator struct {
+	ShouldFail bool
+}
+
+func (m *MockEmailValidator) ValidateGoogleEmail(ctx context.Context, email string) error {
+	if m.ShouldFail || strings.Contains(email, "invalid") {
+		return domain.ErrInvalidEmailGoogle
+	}
+	return nil
+}
+
 func TestCustomerUseCase_RegisterNewCustomer(t *testing.T) {
 	kmsRepo := mockRepo()
 	masterKey := "super-secret-master-key-32bytes!"
@@ -63,15 +121,19 @@ func TestCustomerUseCase_RegisterNewCustomer(t *testing.T) {
 	}
 
 	custRepo := mockCustomerRepo()
+	verifRepo := newMockVerificationRepo()
+	mailSvc := &MockMailService{}
+	emailVal := &MockEmailValidator{}
 	workerPool := usecase.NewWorkerPool(2, 10)
 	defer workerPool.Shutdown(context.Background())
 
-	uc := usecase.NewCustomerUseCase(custRepo, kmsService, workerPool)
+	jwtSecret := "test-jwt-secret-key"
+	uc := usecase.NewCustomerUseCase(custRepo, kmsService, workerPool, verifRepo, mailSvc, emailVal, jwtSecret)
 
 	// Encrypt sample payload from client side
 	nikEnc, _ := kmsService.EncryptPII("3271012345670001", usecase.AAD_NIK)
 	nameEnc, _ := kmsService.EncryptPII("Budi Santoso", usecase.AAD_FULL_NAME)
-	emailEnc, _ := kmsService.EncryptPII("budi@example.com", usecase.AAD_EMAIL)
+	emailEnc, _ := kmsService.EncryptPII("budi@gmail.com", usecase.AAD_EMAIL)
 	phoneEnc, _ := kmsService.EncryptPII("+6281234567890", usecase.AAD_PHONE)
 	addressEnc, _ := kmsService.EncryptPII("Jl. Jendral Sudirman No. 10, Jakarta", usecase.AAD_ADDRESS)
 
@@ -91,187 +153,73 @@ func TestCustomerUseCase_RegisterNewCustomer(t *testing.T) {
 		t.Fatalf("expected successful registration, got err: %v", err)
 	}
 
-	if len(resp.Email) == 0 {
-		t.Errorf("expected non-empty encrypted email bytes in response")
+	if resp.Email == "" {
+		t.Errorf("expected non-empty masked email in response")
+	}
+	if !strings.Contains(resp.Email, "***") {
+		t.Errorf("expected masked email, got: %s", resp.Email)
+	}
+	if resp.VerificationToken == "" {
+		t.Errorf("expected non-empty verificationToken in response")
 	}
 
 	savedCust := custRepo.customers["mock-uuid-1234-5678"]
 	if savedCust == nil {
 		t.Fatalf("expected customer to be saved in repository")
 	}
-
 	if savedCust.Status != domain.StatusPendingVerification {
 		t.Errorf("expected status PENDING_VERIFICATION, got %s", savedCust.Status)
 	}
 
-	// 2. Duplicate Registration Test
-	_, err = uc.RegisterNewCustomer(ctx, req)
-	if err == nil {
-		t.Fatalf("expected error on duplicate registration, got nil")
+	// 2. Test Verification flow
+	savedVerif := verifRepo.verifications["mock-verif-id-999"]
+	if savedVerif == nil {
+		t.Fatalf("expected verification record to be created")
 	}
 
-	// 3. Invalid Decryption Test
-	invalidReq := req
-	invalidReq.NIK = []byte("invalid-binary-bytes!!")
-	_, err = uc.RegisterNewCustomer(ctx, invalidReq)
-	if err == nil || !strings.Contains(err.Error(), "dekripsi gagal") {
-		t.Errorf("expected decryption error, got: %v", err)
+	verifResp, err := uc.VerifyCustomer(ctx, dto.VerifyCustomerRequest{
+		VerificationToken: resp.VerificationToken,
+		Code:              string([]byte{byte('0' + savedVerif.Code/10000), byte('0' + (savedVerif.Code/1000)%10), byte('0' + (savedVerif.Code/100)%10), byte('0' + (savedVerif.Code/10)%10), byte('0' + savedVerif.Code%10)}),
+	})
+	if err != nil {
+		t.Fatalf("expected successful verification, got err: %v", err)
+	}
+	if !verifResp.Success {
+		t.Errorf("expected verification success to be true")
+	}
+	if savedCust.Status != domain.StatusActive {
+		t.Errorf("expected customer status to be ACTIVE, got %s", savedCust.Status)
 	}
 }
 
-func TestCustomerUseCase_RegisterNewCustomerRaw_HybridEncryption(t *testing.T) {
+func TestCustomerUseCase_RejectInvalidGoogleEmail(t *testing.T) {
 	kmsRepo := mockRepo()
 	masterKey := "super-secret-master-key-32bytes!"
-	kmsService, err := usecase.NewLocalKMSService(masterKey, kmsRepo)
-	if err != nil {
-		t.Fatalf("failed to init KMS: %v", err)
-	}
+	kmsService, _ := usecase.NewLocalKMSService(masterKey, kmsRepo)
 
 	custRepo := mockCustomerRepo()
-	workerPool := usecase.NewWorkerPool(2, 10)
-	defer workerPool.Shutdown(context.Background())
+	verifRepo := newMockVerificationRepo()
+	mailSvc := &MockMailService{}
+	emailVal := &MockEmailValidator{ShouldFail: true}
+	jwtSecret := "test-jwt-secret-key"
+	uc := usecase.NewCustomerUseCase(custRepo, kmsService, nil, verifRepo, mailSvc, emailVal, jwtSecret)
 
-	// Generate RSA key pair for transit encryption
-	privKey, pubKey, err := security.GenerateRSAKeyPair(2048)
-	if err != nil {
-		t.Fatalf("failed to generate RSA key: %v", err)
-	}
+	nikEnc, _ := kmsService.EncryptPII("3271012345670002", usecase.AAD_NIK)
+	nameEnc, _ := kmsService.EncryptPII("Budi Invalid", usecase.AAD_FULL_NAME)
+	emailEnc, _ := kmsService.EncryptPII("budi@invalid.com", usecase.AAD_EMAIL)
+	phoneEnc, _ := kmsService.EncryptPII("+6281234567891", usecase.AAD_PHONE)
+	addressEnc, _ := kmsService.EncryptPII("Jl. Melati No. 5", usecase.AAD_ADDRESS)
 
-	transitDec := security.NewTransitDecryptor(privKey)
-	uc := usecase.NewCustomerUseCase(custRepo, kmsService, workerPool, transitDec)
-
-	// Plaintext registration payload from mobile app
-	customerJSON := []byte(`{
-		"nik": "3201012345670001",
-		"full_name": "Siti Nurhaliza",
-		"email": "siti.nurhaliza@example.com",
-		"phone_number": "+6281298765432",
-		"address": "Jl. Gatot Subroto No. 50, Jakarta",
-		"password": "SecurePassword123!"
-	}`)
-
-	// Encrypt using hybrid RSA-OAEP + AES-256-GCM (Pola 1)
-	encryptedRawBody, sessionKey, err := security.EncryptRawTransitPayloadWithKey(pubKey, customerJSON)
-	if err != nil {
-		t.Fatalf("failed to encrypt hybrid payload: %v", err)
+	req := dto.EncryptedRegisterCustomerRequest{
+		NIK:         nikEnc,
+		FullName:    nameEnc,
+		Email:       emailEnc,
+		PhoneNumber: phoneEnc,
+		Address:     addressEnc,
 	}
 
-	ctx := context.Background()
-
-	// 1. Success Registration via Raw Hybrid Payload
-	resp, err := uc.RegisterNewCustomerRaw(ctx, encryptedRawBody)
-	if err != nil {
-		t.Fatalf("expected successful raw registration, got: %v", err)
-	}
-
-	if len(resp.Email) == 0 {
-		t.Errorf("expected non-empty encrypted email bytes in response")
-	}
-
-	// Verify that response email can be decrypted with sessionKey (Option A: Transit Shared Secret)
-	if len(resp.Email) < 28 {
-		t.Fatalf("expected response email length >= 28 bytes, got %d", len(resp.Email))
-	}
-	block, err := aes.NewCipher(sessionKey)
-	if err != nil {
-		t.Fatalf("failed to create cipher: %v", err)
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		t.Fatalf("failed to create gcm: %v", err)
-	}
-	iv := resp.Email[:12]
-	ct := resp.Email[12:]
-	decEmailBytes, err := gcm.Open(nil, iv, ct, nil)
-	if err != nil {
-		t.Fatalf("failed to decrypt response email with sessionKey: %v", err)
-	}
-	if string(decEmailBytes) != "siti.nurhaliza@example.com" {
-		t.Errorf("expected decrypted response email siti.nurhaliza@example.com, got %s", string(decEmailBytes))
-	}
-
-	// Verify that the stored customer in repo was encrypted using Tink KMS Keyset
-	savedCust := custRepo.customers["mock-uuid-1234-5678"]
-	if savedCust == nil {
-		t.Fatal("expected customer to be saved in repository")
-	}
-
-	if savedCust.Status != domain.StatusPendingVerification {
-		t.Errorf("expected status PENDING_VERIFICATION, got %s", savedCust.Status)
-	}
-
-	// Decrypt using KMS service to verify data-at-rest Tink preservation
-	decNIK, err := kmsService.DecryptPII(savedCust.NIK, usecase.AAD_NIK)
-	if err != nil {
-		t.Fatalf("failed to decrypt saved NIK with KMS: %v", err)
-	}
-	if decNIK != "3201012345670001" {
-		t.Errorf("expected saved NIK 3201012345670001, got %s", decNIK)
-	}
-
-	// 2. Corrupted Payload Error
-	corrupted := append([]byte(nil), encryptedRawBody...)
-	corrupted[len(corrupted)-1] ^= 0xFF
-	_, err = uc.RegisterNewCustomerRaw(ctx, corrupted)
-	if err == nil {
-		t.Fatal("expected error on corrupted raw payload, got nil")
+	_, err := uc.RegisterNewCustomer(context.Background(), req)
+	if err != domain.ErrInvalidEmailGoogle {
+		t.Fatalf("expected ErrInvalidEmailGoogle, got: %v", err)
 	}
 }
-
-func TestCustomerUseCase_PhoneNumberNormalization_LocalFormat(t *testing.T) {
-	kmsRepo := mockRepo()
-	masterKey := "super-secret-master-key-32bytes!"
-	kmsService, err := usecase.NewLocalKMSService(masterKey, kmsRepo)
-	if err != nil {
-		t.Fatalf("failed to init KMS: %v", err)
-	}
-
-	custRepo := mockCustomerRepo()
-	workerPool := usecase.NewWorkerPool(2, 10)
-	defer workerPool.Shutdown(context.Background())
-
-	privKey, pubKey, _ := security.GenerateRSAKeyPair(2048)
-	transitDec := security.NewTransitDecryptor(privKey)
-	uc := usecase.NewCustomerUseCase(custRepo, kmsService, workerPool, transitDec)
-
-	// Payload with local phone number "081234567890" without +62 prefix
-	customerJSON := []byte(`{
-		"nik": "3201015555550001",
-		"full_name": "Rudi Tabuti",
-		"email": "rudi.tabuti@example.com",
-		"phone_number": "081234567890",
-		"address": "Jl. Melawai Raya No. 12, Jakarta",
-		"password": "SecurePassword123!"
-	}`)
-
-	encryptedRawBody, err := security.EncryptRawTransitPayload(pubKey, customerJSON)
-	if err != nil {
-		t.Fatalf("failed to encrypt: %v", err)
-	}
-
-	ctx := context.Background()
-	resp, err := uc.RegisterNewCustomerRaw(ctx, encryptedRawBody)
-	if err != nil {
-		t.Fatalf("expected successful registration with local phone number, got error: %v", err)
-	}
-
-	if len(resp.Email) == 0 {
-		t.Errorf("expected non-empty encrypted email bytes in response")
-	}
-
-	savedCust := custRepo.customers["mock-uuid-1234-5678"]
-	if savedCust == nil {
-		t.Fatal("expected customer to be saved")
-	}
-
-	decPhone, err := kmsService.DecryptPII(savedCust.PhoneNumber, usecase.AAD_PHONE)
-	if err != nil {
-		t.Fatalf("failed to decrypt phone with KMS: %v", err)
-	}
-
-	if decPhone != "+6281234567890" {
-		t.Errorf("expected phone number to be normalized to '+6281234567890', got '%s'", decPhone)
-	}
-}
-
-

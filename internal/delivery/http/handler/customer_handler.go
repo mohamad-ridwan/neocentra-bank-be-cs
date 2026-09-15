@@ -52,6 +52,15 @@ func (h *CustomerHandler) RegisterCustomer(c *gin.Context) {
 				return
 			}
 
+			if errors.Is(err, domain.ErrInvalidEmailGoogle) {
+				c.JSON(http.StatusBadRequest, gin.H{
+					"success": false,
+					"code":    http.StatusBadRequest,
+					"message": err.Error(),
+				})
+				return
+			}
+
 			if errors.Is(err, domain.ErrDuplicateNIK) ||
 				errors.Is(err, domain.ErrDuplicateEmail) ||
 				errors.Is(err, domain.ErrDuplicatePhone) {
@@ -115,6 +124,15 @@ executeUseCase:
 	// 3. Eksekusi Register via UseCase
 	res, err := h.useCase.RegisterNewCustomer(c.Request.Context(), req)
 	if err != nil {
+		if errors.Is(err, domain.ErrInvalidEmailGoogle) {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"success": false,
+				"code":    http.StatusBadRequest,
+				"message": err.Error(),
+			})
+			return
+		}
+
 		if errors.Is(err, domain.ErrDuplicateNIK) ||
 			errors.Is(err, domain.ErrDuplicateEmail) ||
 			errors.Is(err, domain.ErrDuplicatePhone) {
@@ -149,4 +167,55 @@ executeUseCase:
 		Message: "Formulir pendaftaran calon nasabah berhasil diterima dengan status PENDING_VERIFICATION",
 		Data:    *res,
 	})
+}
+
+func (h *CustomerHandler) VerifyCustomer(c *gin.Context) {
+	var req dto.VerifyCustomerRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"code":    http.StatusBadRequest,
+			"message": "Format request verifikasi tidak valid. Pastikan verificationToken dan code 5-digit disertakan.",
+		})
+		return
+	}
+
+	res, err := h.useCase.VerifyCustomer(c.Request.Context(), req)
+	if err != nil {
+		if errors.Is(err, domain.ErrVerificationNotFound) {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"success": false,
+				"code":    http.StatusBadRequest,
+				"message": "Kode verifikasi tidak sesuai atau telah kadaluwarsa.",
+			})
+			return
+		}
+
+		if errors.Is(err, domain.ErrVerificationExpired) || errors.Is(err, security.ErrExpiredVerificationToken) {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"success": false,
+				"code":    http.StatusBadRequest,
+				"message": "Kode verifikasi telah kadaluwarsa. Silakan lakukan registrasi ulang.",
+			})
+			return
+		}
+
+		if errors.Is(err, security.ErrInvalidVerificationToken) {
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"success": false,
+				"code":    http.StatusUnauthorized,
+				"message": "Token verifikasi tidak valid.",
+			})
+			return
+		}
+
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"code":    http.StatusInternalServerError,
+			"message": err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, res)
 }
