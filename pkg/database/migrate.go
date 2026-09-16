@@ -29,6 +29,35 @@ func AutoMigrate(ctx context.Context, pool *pgxpool.Pool) error {
 
 	-- Ensure password_hash exists on customers table
 	ALTER TABLE customers ADD COLUMN IF NOT EXISTS password_hash VARCHAR(255) NOT NULL DEFAULT '';
+
+	-- Ensure account_product_type_enum exists
+	DO $$ BEGIN
+		IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'account_product_type_enum') THEN
+			CREATE TYPE account_product_type_enum AS ENUM ('REGULAR_SAVINGS', 'PRIORITY_SAVINGS', 'STUDENT_SAVINGS');
+		END IF;
+	END $$;
+
+	-- Enhance accounts table for in-app onboarding & PIN security
+	ALTER TABLE accounts
+		ALTER COLUMN account_number TYPE VARCHAR(20),
+		ADD COLUMN IF NOT EXISTS product_type account_product_type_enum NOT NULL DEFAULT 'REGULAR_SAVINGS',
+		ADD COLUMN IF NOT EXISTS pin_hash VARCHAR(255) NOT NULL DEFAULT '',
+		ADD COLUMN IF NOT EXISTS pin_attempts INT NOT NULL DEFAULT 0,
+		ADD COLUMN IF NOT EXISTS pin_locked_until TIMESTAMP WITH TIME ZONE NULL,
+		ADD COLUMN IF NOT EXISTS pin_updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+		ADD COLUMN IF NOT EXISTS branch_code VARCHAR(10) NOT NULL DEFAULT '001',
+		ADD COLUMN IF NOT EXISTS kyc_reference_id UUID NULL REFERENCES kyc_verifications(kyc_id);
+
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_accounts_account_number_unique 
+		ON accounts(account_number) 
+		WHERE account_number IS NOT NULL AND account_number <> '';
+
+	CREATE INDEX IF NOT EXISTS idx_accounts_customer_status 
+		ON accounts(customer_id, status);
+
+	CREATE INDEX IF NOT EXISTS idx_accounts_pin_lookup 
+		ON accounts(account_id) 
+		INCLUDE (pin_hash, pin_attempts, pin_locked_until);
 	`
 
 	_, err := pool.Exec(ctx, query)
@@ -36,6 +65,6 @@ func AutoMigrate(ctx context.Context, pool *pgxpool.Pool) error {
 		return fmt.Errorf("failed to run automigrate: %w", err)
 	}
 
-	log.Println("[INFO] Database AutoMigrate executed successfully (tables verified, 'password_hash' column confirmed).")
+	log.Println("[INFO] Database AutoMigrate executed successfully (tables, accounts, and PIN security verified).")
 	return nil
 }

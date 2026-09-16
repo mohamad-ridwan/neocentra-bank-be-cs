@@ -106,3 +106,37 @@ func GenerateAccessToken(customerID, role, secretKey string, duration time.Durat
 
 	return tokenString, nil
 }
+
+// GenerateSessionToken creates an elevated access JWT with RBAC claims and account metadata
+func GenerateSessionToken(customerID, role, secretKey string, hasAccount bool, accountStatus, accountID, accountNumber string, duration time.Duration) (string, error) {
+	if duration <= 0 {
+		duration = 15 * time.Minute
+	}
+	if secretKey == "" {
+		secretKey = "super_secret_jwt_key_hs256_neocentra_bank_2026"
+	}
+	if role == "" {
+		role = "ROLE_CUSTOMER_BASIC"
+	}
+
+	claims := jwt.MapClaims{
+		"user_id":        customerID,
+		"sub":            customerID,
+		"role":           role,
+		"has_account":    hasAccount,
+		"account_status": accountStatus,
+		"account_id":     accountID,
+		"account_number": accountNumber,
+		"exp":            time.Now().Add(duration).Unix(),
+		"iat":            time.Now().Unix(),
+		"iss":            "neocentra-bank",
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	tokenString, err := token.SignedString([]byte(secretKey))
+	if err != nil {
+		return "", fmt.Errorf("gagal menandatangani session token: %w", err)
+	}
+
+	return tokenString, nil
+}

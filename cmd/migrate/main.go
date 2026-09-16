@@ -40,11 +40,11 @@ func main() {
 	err = pool.QueryRow(ctx, `
 		SELECT column_name 
 		FROM information_schema.columns 
-		WHERE table_name = 'customers' AND column_name = 'password_hash'
+		WHERE table_name = 'accounts' AND column_name = 'product_type'
 	`).Scan(&colName)
 	if err != nil {
-		log.Fatalf("[FATAL] Column password_hash verification failed: %v", err)
+		log.Fatalf("[FATAL] Column product_type verification failed: %v", err)
 	}
 
-	log.Printf("[SUCCESS] Migration complete! Verified column '%s' exists on table 'customers'.", colName)
+	log.Printf("[SUCCESS] Migration complete! Verified column '%s' exists on table 'accounts'.", colName)
 }

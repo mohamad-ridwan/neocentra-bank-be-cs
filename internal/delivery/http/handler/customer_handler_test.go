@@ -366,6 +366,41 @@ func (m *mockAccountRepo) FindAccountsByCustomerID(ctx context.Context, customer
 	return m.accounts, nil
 }
 
+func (m *mockAccountRepo) CreateAccount(ctx context.Context, acc *domain.Account) error {
+	m.accounts = append(m.accounts, *acc)
+	return nil
+}
+
+func (m *mockAccountRepo) FindAccountByID(ctx context.Context, accountID string) (*domain.Account, error) {
+	for _, acc := range m.accounts {
+		if acc.AccountID == accountID {
+			return &acc, nil
+		}
+	}
+	return nil, nil
+}
+
+func (m *mockAccountRepo) FindAccountByNumber(ctx context.Context, accountNumber string) (*domain.Account, error) {
+	for _, acc := range m.accounts {
+		if acc.AccountNumber == accountNumber {
+			return &acc, nil
+		}
+	}
+	return nil, nil
+}
+
+func (m *mockAccountRepo) UpdatePINAttempts(ctx context.Context, accountID string, attempts int, lockedUntil *time.Time) error {
+	return nil
+}
+
+func (m *mockAccountRepo) ResetPINAttempts(ctx context.Context, accountID string) error {
+	return nil
+}
+
+func (m *mockAccountRepo) HasActiveAccount(ctx context.Context, customerID string) (bool, error) {
+	return len(m.accounts) > 0, nil
+}
+
 func TestCustomerHandler_LoginCustomer(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

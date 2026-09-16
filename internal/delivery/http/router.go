@@ -10,8 +10,13 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-func SetupRouter(custHandler *handler.CustomerHandler, rdb *redis.Client) *gin.Engine {
+func SetupRouter(custHandler *handler.CustomerHandler, rdb *redis.Client, accHandlers ...*handler.AccountHandler) *gin.Engine {
 	r := gin.New()
+
+	var accHandler *handler.AccountHandler
+	if len(accHandlers) > 0 && accHandlers[0] != nil {
+		accHandler = accHandlers[0]
+	}
 
 	// Global Middlewares
 	r.Use(middleware.CORSMiddleware())
@@ -50,7 +55,12 @@ func SetupRouter(custHandler *handler.CustomerHandler, rdb *redis.Client) *gin.E
 		protected := v1.Group("")
 		protected.Use(middleware.JWTAuthMiddleware())
 		{
-			// Endpoint yang membutuhkan autentikasi JWT pengguna terdaftar
+			if accHandler != nil {
+				// Pembukaan rekening baru (ROLE_CUSTOMER_BASIC)
+				protected.POST("/accounts/open", middleware.RequireRole("ROLE_CUSTOMER_BASIC", "customer"), accHandler.OpenAccount)
+				// Verifikasi PIN transaksi (ROLE_CUSTOMER_TRANSACTIONAL)
+				protected.POST("/accounts/verify-pin", middleware.RequireRole("ROLE_CUSTOMER_TRANSACTIONAL"), accHandler.VerifyPIN)
+			}
 		}
 	}
 

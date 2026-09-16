@@ -116,10 +116,13 @@ func main() {
 	)
 
 	accountUseCase := usecase.NewAccountUseCase(accountRepo, transitDecryptor)
+	accountUseCase.SetCustomerRepo(custRepo)
+	accountUseCase.SetJWTSecret(cfg.JWTSecret)
 
 	// 6. Initialize Delivery Layer (Handler & Router)
 	custHandler := handler.NewCustomerHandler(custUseCase, accountUseCase)
-	router := deliveryHttp.SetupRouter(custHandler, redisClient)
+	accHandler := handler.NewAccountHandler(accountUseCase)
+	router := deliveryHttp.SetupRouter(custHandler, redisClient, accHandler)
 
 	// 7. Start HTTP Server
 	serverAddr := fmt.Sprintf(":%s", cfg.Port)
