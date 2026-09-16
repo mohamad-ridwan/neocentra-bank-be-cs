@@ -26,13 +26,16 @@ func AutoMigrate(ctx context.Context, pool *pgxpool.Pool) error {
 
 	CREATE INDEX IF NOT EXISTS idx_verifications_lookup ON verifications(verification_id, customer_id, code);
 	CREATE INDEX IF NOT EXISTS idx_verifications_expires_at ON verifications(expires_at);
+
+	-- Ensure password_hash exists on customers table
+	ALTER TABLE customers ADD COLUMN IF NOT EXISTS password_hash VARCHAR(255) NOT NULL DEFAULT '';
 	`
 
 	_, err := pool.Exec(ctx, query)
 	if err != nil {
-		return fmt.Errorf("failed to run automigrate for verifications: %w", err)
+		return fmt.Errorf("failed to run automigrate: %w", err)
 	}
 
-	log.Println("[INFO] Database AutoMigrate executed successfully (table 'verifications' verified).")
+	log.Println("[INFO] Database AutoMigrate executed successfully (tables verified, 'password_hash' column confirmed).")
 	return nil
 }

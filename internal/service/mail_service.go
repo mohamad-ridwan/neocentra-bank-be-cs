@@ -83,7 +83,7 @@ func (s *SmtpMailService) SendVerificationCode(ctx context.Context, toEmail, cus
     </div>
     <div class="otp-box">
       <div class="otp-code">%s</div>
-      <div class="otp-timer">Kode ini berlaku selama 1 menit (60 detik)</div>
+      <div class="otp-timer">Kode ini berlaku selama 5 menit (300 detik)</div>
     </div>
     <div class="warning-box">
       <strong>PENTING:</strong> JANGAN PERNAH memberikan kode verifikasi ini kepada siapa pun, termasuk pihak yang mengatasnamakan Neocentra Bank. Tim bank tidak pernah meminta kode rahasia ini.

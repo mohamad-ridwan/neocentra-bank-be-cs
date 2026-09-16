@@ -3,6 +3,8 @@ package handler_test
 import (
 	"bytes"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -23,6 +25,8 @@ import (
 	"customer-service/internal/dto"
 	"customer-service/internal/security"
 	"customer-service/internal/usecase"
+
+	"github.com/gin-gonic/gin"
 )
 
 type mockCustRepo struct {
@@ -45,6 +49,22 @@ func (m *mockCustRepo) CreateCustomer(ctx context.Context, customer *domain.Cust
 }
 func (m *mockCustRepo) UpdateCustomerStatus(ctx context.Context, customerID string, status domain.CustomerStatus) error {
 	return nil
+}
+func (m *mockCustRepo) FindCustomerByIdentifier(ctx context.Context, identifier string) (*domain.Customer, *usecase.DecryptedCustomerPII, error) {
+	// Hash dari "Password123#" menggunakan Argon2id
+	passHash, _ := security.HashPassword("Password123#")
+	return &domain.Customer{
+		CustomerID:   "test-cust-id-123",
+		PasswordHash: passHash,
+		Status:       domain.StatusActive,
+	}, &usecase.DecryptedCustomerPII{
+		CustomerID:  "test-cust-id-123",
+		NIK:         "3271012345670001",
+		FullName:    "Budi Santoso",
+		Email:       "budi@example.com",
+		PhoneNumber: "+6281234567890",
+		Status:      "ACTIVE",
+	}, nil
 }
 
 type mockVerifRepo struct {
@@ -336,4 +356,163 @@ func (m *mockKmsRepo) SaveKeyset(ctx context.Context, keyName string, encryptedK
 }
 func (m *mockKmsRepo) UpdateKeyset(ctx context.Context, keyName string, encryptedKeyset []byte, primaryKeyID uint32, version int) error {
 	return nil
+}
+
+type mockAccountRepo struct {
+	accounts []domain.Account
+}
+
+func (m *mockAccountRepo) FindAccountsByCustomerID(ctx context.Context, customerID string) ([]domain.Account, error) {
+	return m.accounts, nil
+}
+
+func TestCustomerHandler_LoginCustomer(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	privKey, pubKey, err := security.GenerateRSAKeyPair(2048)
+	if err != nil {
+		t.Fatalf("failed to generate key pair: %v", err)
+	}
+	transitDec := security.NewTransitDecryptor(privKey)
+
+	repo := &mockCustRepo{}
+	kmsService, _ := usecase.NewLocalKMSService("test-master-key-32b-secret!!!!!!", mockRepo())
+	wp := usecase.NewWorkerPool(1, 10)
+	verifRepo := &mockVerifRepo{}
+
+	uc := usecase.NewCustomerUseCase(repo, kmsService, wp, verifRepo, &mockMailSvc{}, &mockEmailVal{}, "jwt-secret", transitDec)
+	accRepo := &mockAccountRepo{
+		accounts: []domain.Account{
+			{
+				AccountID:     "acc-123",
+				CustomerID:    "test-cust-id-123",
+				AccountNumber: "880912345678",
+				Balance:       15000000,
+				Currency:      "IDR",
+				Status:        domain.AccountStatusActive,
+			},
+		},
+	}
+	accUC := usecase.NewAccountUseCase(accRepo, transitDec)
+	h := handler.NewCustomerHandler(uc, accUC)
+
+	router := gin.New()
+	router.POST("/api/v1/customers/login", h.LoginCustomer)
+
+	loginJSON := []byte(`{"identifier":"budi@example.com","password":"Password123#"}`)
+	rawBody, sessionKey, err := security.EncryptRawTransitPayloadWithKey(pubKey, loginJSON)
+	if err != nil {
+		t.Fatalf("failed to encrypt login payload: %v", err)
+	}
+
+	req, _ := http.NewRequest("POST", "/api/v1/customers/login", bytes.NewReader(rawBody))
+	req.Header.Set("Content-Type", "application/octet-stream")
+
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200 OK, got %d. Body: %s", w.Code, w.Body.String())
+	}
+
+	if w.Header().Get("Content-Type") != "application/octet-stream" {
+		t.Errorf("expected Content-Type application/octet-stream, got %s", w.Header().Get("Content-Type"))
+	}
+
+	// Decrypt response using sessionKey
+	respBytes := w.Body.Bytes()
+	decryptedJSON, err := decryptTransitResponse(sessionKey, respBytes)
+	if err != nil {
+		t.Fatalf("failed to decrypt response: %v", err)
+	}
+
+	var resp dto.LoginCustomerResponseData
+	if err := json.Unmarshal(decryptedJSON, &resp); err != nil {
+		t.Fatalf("failed to unmarshal decrypted JSON: %v", err)
+	}
+
+	if resp.CustomerID != "test-cust-id-123" {
+		t.Errorf("expected customer_id 'test-cust-id-123', got '%s'", resp.CustomerID)
+	}
+	if resp.AccessToken == "" {
+		t.Errorf("expected non-empty access_token")
+	}
+
+	// 2. Test Login dengan password yang salah -> Wajib 401 Unauthorized
+	wrongLoginJSON := []byte(`{"identifier":"budi@example.com","password":"WrongPassword123#"}`)
+	rawBodyWrong, _, err := security.EncryptRawTransitPayloadWithKey(pubKey, wrongLoginJSON)
+	if err != nil {
+		t.Fatalf("failed to encrypt wrong login payload: %v", err)
+	}
+
+	reqWrong, _ := http.NewRequest("POST", "/api/v1/customers/login", bytes.NewReader(rawBodyWrong))
+	reqWrong.Header.Set("Content-Type", "application/octet-stream")
+
+	wWrong := httptest.NewRecorder()
+	router.ServeHTTP(wWrong, reqWrong)
+
+	if wWrong.Code != http.StatusUnauthorized {
+		t.Errorf("expected status 401 Unauthorized for wrong password, got %d. Body: %s", wWrong.Code, wWrong.Body.String())
+	}
+}
+
+func TestCustomerHandler_GetAccounts(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	privKey, _, err := security.GenerateRSAKeyPair(2048)
+	if err != nil {
+		t.Fatalf("failed to generate key pair: %v", err)
+	}
+	transitDec := security.NewTransitDecryptor(privKey)
+
+	accRepo := &mockAccountRepo{
+		accounts: []domain.Account{
+			{
+				AccountID:     "acc-123",
+				CustomerID:    "test-cust-id-123",
+				AccountNumber: "880912345678",
+				Balance:       15000000,
+				Currency:      "IDR",
+				Status:        domain.AccountStatusActive,
+			},
+		},
+	}
+	accUC := usecase.NewAccountUseCase(accRepo, transitDec)
+	h := handler.NewCustomerHandler(nil, accUC)
+
+	router := gin.New()
+	router.POST("/api/v1/accounts", h.GetAccounts)
+
+	jsonBody := []byte(`{"customer_id":"test-cust-id-123"}`)
+	req, _ := http.NewRequest("POST", "/api/v1/accounts", bytes.NewReader(jsonBody))
+	req.Header.Set("Content-Type", "application/json")
+
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200 OK, got %d. Body: %s", w.Code, w.Body.String())
+	}
+
+	if w.Header().Get("Content-Type") != "application/octet-stream" {
+		t.Errorf("expected Content-Type application/octet-stream, got %s", w.Header().Get("Content-Type"))
+	}
+}
+
+func decryptTransitResponse(sessionKey, body []byte) ([]byte, error) {
+	if len(body) < 12+16 {
+		return nil, fmt.Errorf("body too short")
+	}
+	iv := body[:12]
+	ciphertextWithTag := body[12:]
+
+	block, err := aes.NewCipher(sessionKey)
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	return gcm.Open(nil, iv, ciphertextWithTag, nil)
 }

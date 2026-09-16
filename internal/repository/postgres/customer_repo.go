@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"customer-service/internal/domain"
+	"customer-service/internal/usecase"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -33,8 +34,8 @@ func (r *CustomerRepository) SetDecryptor(decryptor PIIDecryptor) {
 
 func (r *CustomerRepository) CreateCustomer(ctx context.Context, customer *domain.Customer) error {
 	query := `
-		INSERT INTO customers (nik, full_name, email, phone_number, address, status, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+		INSERT INTO customers (nik, full_name, email, phone_number, address, password_hash, status, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
 		RETURNING customer_id, created_at, updated_at
 	`
 
@@ -49,6 +50,7 @@ func (r *CustomerRepository) CreateCustomer(ctx context.Context, customer *domai
 		customer.Email,
 		customer.PhoneNumber,
 		customer.Address,
+		customer.PasswordHash,
 		string(customer.Status),
 	).Scan(&customerID, &createdAt, &updatedAt)
 
@@ -197,4 +199,98 @@ func (r *CustomerRepository) UpdateCustomerStatus(ctx context.Context, customerI
 		return fmt.Errorf("customer with ID %s not found", customerID)
 	}
 	return nil
+}
+
+func (r *CustomerRepository) FindCustomerByIdentifier(ctx context.Context, identifier string) (*domain.Customer, *usecase.DecryptedCustomerPII, error) {
+	if r.decryptor == nil {
+		return nil, nil, fmt.Errorf("pii decryptor is not configured")
+	}
+
+	query := `
+		SELECT customer_id, nik, full_name, email, phone_number, address, password_hash, status, created_at, updated_at
+		FROM customers
+	`
+	rows, err := r.pool.Query(ctx, query)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to query customers: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			customerID   string
+			encNIK       []byte
+			encName      []byte
+			encEmail     []byte
+			encPhone     []byte
+			encAddress   []byte
+			passwordHash string
+			statusStr    string
+			createdAt    time.Time
+			updatedAt    time.Time
+		)
+
+		if err := rows.Scan(&customerID, &encNIK, &encName, &encEmail, &encPhone, &encAddress, &passwordHash, &statusStr, &createdAt, &updatedAt); err != nil {
+			return nil, nil, fmt.Errorf("failed to scan customer row: %w", err)
+		}
+
+		plainEmail, errEmail := r.decryptor.DecryptPII(encEmail, "customer_email_aad")
+		if errEmail != nil {
+			plainEmail, _ = r.decryptor.DecryptPII(encEmail, "customer_pii")
+		}
+
+		plainNIK, errNIK := r.decryptor.DecryptPII(encNIK, "customer_nik_aad")
+		if errNIK != nil {
+			plainNIK, _ = r.decryptor.DecryptPII(encNIK, "customer_pii")
+		}
+
+		plainPhone, errPhone := r.decryptor.DecryptPII(encPhone, "customer_phone_number_aad")
+		if errPhone != nil {
+			plainPhone, _ = r.decryptor.DecryptPII(encPhone, "customer_pii")
+		}
+
+		// Match identifier against email, nik, or phone number
+		if plainEmail == identifier || plainNIK == identifier || plainPhone == identifier {
+			plainName, _ := r.decryptor.DecryptPII(encName, "customer_full_name_aad")
+			if plainName == "" {
+				plainName, _ = r.decryptor.DecryptPII(encName, "customer_pii")
+			}
+
+			plainAddress, _ := r.decryptor.DecryptPII(encAddress, "customer_address_aad")
+			if plainAddress == "" {
+				plainAddress, _ = r.decryptor.DecryptPII(encAddress, "customer_pii")
+			}
+
+			cust := &domain.Customer{
+				CustomerID:   customerID,
+				NIK:          encNIK,
+				FullName:     encName,
+				Email:        encEmail,
+				PhoneNumber:  encPhone,
+				Address:      encAddress,
+				PasswordHash: passwordHash,
+				Status:       domain.CustomerStatus(statusStr),
+				CreatedAt:    createdAt,
+				UpdatedAt:    updatedAt,
+			}
+
+			dec := &usecase.DecryptedCustomerPII{
+				CustomerID:  customerID,
+				NIK:         plainNIK,
+				FullName:    plainName,
+				Email:       plainEmail,
+				PhoneNumber: plainPhone,
+				Address:     plainAddress,
+				Status:      statusStr,
+			}
+
+			return cust, dec, nil
+		}
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, nil, fmt.Errorf("failed iterating customer rows: %w", err)
+	}
+
+	return nil, nil, domain.ErrCustomerNotFound
 }

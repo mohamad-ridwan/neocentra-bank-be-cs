@@ -158,6 +158,7 @@ func (u *CustomerUseCase) RegisterNewCustomer(
 		Email:       emailPlain,
 		PhoneNumber: phonePlain,
 		Address:     addressPlain,
+		Password:    req.Password,
 	}
 
 	return u.processRegistration(ctx, plainDTO)
@@ -257,14 +258,29 @@ func (u *CustomerUseCase) processRegistration(
 		return nil, fmt.Errorf("gagal mengenkripsi Address: %w", err)
 	}
 
-	// 5. Simpan Record ke Database PostgreSQL (Status: PENDING_VERIFICATION)
+	// 5. Hash Password menggunakan Argon2id (OWASP standard)
+	passwordPlain := strings.TrimSpace(plainDTO.Password)
+	if passwordPlain == "" {
+		return nil, domain.ErrPasswordEmpty
+	}
+	if len(passwordPlain) < 8 {
+		return nil, errors.New("password minimal harus 8 karakter")
+	}
+
+	passwordHash, err := security.HashPassword(passwordPlain)
+	if err != nil {
+		return nil, fmt.Errorf("gagal melakukan hash password: %w", err)
+	}
+
+	// 6. Simpan Record ke Database PostgreSQL (Status: PENDING_VERIFICATION)
 	customer := &domain.Customer{
-		NIK:         encNIKBytes,
-		FullName:    encFullNameBytes,
-		Email:       encEmailBytes,
-		PhoneNumber: encPhoneBytes,
-		Address:     encAddressBytes,
-		Status:      domain.StatusPendingVerification,
+		NIK:          encNIKBytes,
+		FullName:     encFullNameBytes,
+		Email:        encEmailBytes,
+		PhoneNumber:  encPhoneBytes,
+		Address:      encAddressBytes,
+		PasswordHash: passwordHash,
+		Status:       domain.StatusPendingVerification,
 	}
 
 	if err := u.customerRepo.CreateCustomer(ctx, customer); err != nil {
@@ -372,4 +388,98 @@ func (u *CustomerUseCase) VerifyCustomer(ctx context.Context, req dto.VerifyCust
 		Success: true,
 		Message: "Akun anda berhasil di verifikasi",
 	}, nil
+}
+
+// LoginCustomerRaw mendekripsi binary transit login request, memvalidasi status ACTIVE nasabah,
+// membuat JWT access_token 15 menit, dan mengenkripsi kembali respons biner via sessionKey / server envelope
+func (u *CustomerUseCase) LoginCustomerRaw(
+	ctx context.Context,
+	rawBody []byte,
+) ([]byte, error) {
+	if u.transitDecryptor == nil {
+		return nil, errors.New("transit decryptor is not configured")
+	}
+
+	// 1. Dekripsi raw transit body via RSA-OAEP + AES-256-GCM
+	decryptedJSON, sessionKey, err := u.transitDecryptor.DecryptRawTransitPayloadWithKey(rawBody)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", domain.ErrInvalidDecryption, err)
+	}
+
+	// 2. Unmarshal JSON plaintext ke PlaintextLoginCustomer
+	var loginDTO dto.PlaintextLoginCustomer
+	if err := json.Unmarshal(decryptedJSON, &loginDTO); err != nil {
+		return nil, fmt.Errorf("format JSON hasil dekripsi tidak valid: %w", err)
+	}
+
+	identifier := strings.TrimSpace(loginDTO.Identifier)
+	if identifier == "" {
+		return nil, errors.New("identifier login tidak boleh kosong")
+	}
+
+	// 3. Cari data customer di database PostgreSQL
+	cust, decPII, err := u.customerRepo.FindCustomerByIdentifier(ctx, identifier)
+	if err != nil {
+		return nil, err
+	}
+
+	// 4. Validasi bahwa data customer dan PII tidak nil
+	if cust == nil || decPII == nil {
+		return nil, domain.ErrCustomerNotFound
+	}
+
+	// 5. Validasi kecocokan password menggunakan Argon2id
+	passwordLogin := strings.TrimSpace(loginDTO.Password)
+	if passwordLogin == "" {
+		return nil, domain.ErrPasswordEmpty
+	}
+
+	// Jika nasabah memiliki password_hash di database, lakukan komparasi Argon2id
+	if cust.PasswordHash != "" {
+		match, err := security.ComparePasswordAndHash(passwordLogin, cust.PasswordHash)
+		if err != nil || !match {
+			return nil, domain.ErrInvalidCredentials
+		}
+	} else {
+		// Jika record lama belum memiliki password_hash, tolak kredensial
+		return nil, domain.ErrInvalidCredentials
+	}
+
+	// 6. Validasi status customer harus ACTIVE untuk bisa login
+	if cust.Status != domain.StatusActive {
+		if cust.Status == domain.StatusPendingVerification {
+			return nil, domain.ErrCustomerNotActive
+		}
+		return nil, domain.ErrCustomerSuspended
+	}
+
+	// 7. Buat token JWT berumur pendek (15 menit)
+	accessToken, err := security.GenerateAccessToken(cust.CustomerID, "customer", u.jwtSecret, 15*time.Minute)
+	if err != nil {
+		return nil, fmt.Errorf("gagal membuat access token: %w", err)
+	}
+
+	// 6. Bentuk response payload data nasabah murni
+	respData := dto.LoginCustomerResponseData{
+		CustomerID:  cust.CustomerID,
+		NIK:         decPII.NIK,
+		FullName:    decPII.FullName,
+		Email:       decPII.Email,
+		PhoneNumber: decPII.PhoneNumber,
+		Status:      string(cust.Status),
+		AccessToken: accessToken,
+	}
+
+	respJSONBytes, err := json.Marshal(respData)
+	if err != nil {
+		return nil, fmt.Errorf("gagal serialize data login response: %w", err)
+	}
+
+	// 7. Enkripsi respons menggunakan sessionKey yang dikirim mobile
+	encryptedResponse, err := security.EncryptTransitResponse(sessionKey, respJSONBytes)
+	if err != nil {
+		return nil, fmt.Errorf("gagal mengenkripsi transit login response: %w", err)
+	}
+
+	return encryptedResponse, nil
 }

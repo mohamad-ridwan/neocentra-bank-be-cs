@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 )
 
 const (
@@ -27,6 +28,10 @@ type TransitDecryptor struct {
 
 func NewTransitDecryptor(privKey *rsa.PrivateKey) *TransitDecryptor {
 	return &TransitDecryptor{privKey: privKey}
+}
+
+func (d *TransitDecryptor) GetPrivateKey() *rsa.PrivateKey {
+	return d.privKey
 }
 
 // DecryptRawTransitPayloadWithKey mendekripsi payload biner Pola 1 dan mengembalikan session key ephemeral
@@ -220,4 +225,76 @@ func ExportPublicKeyToPEM(pubKey *rsa.PublicKey) ([]byte, error) {
 		Type:  "PUBLIC KEY",
 		Bytes: bytes,
 	}), nil
+}
+
+// PrivateEncrypt melakukan enkripsi data menggunakan RSA Private Key (PKCS#1 v1.5 padding block type 1)
+// Hasilnya dapat didekripsi oleh client menggunakan crypto.publicDecrypt dan RSA Public Key server
+func PrivateEncrypt(priv *rsa.PrivateKey, data []byte) ([]byte, error) {
+	if priv == nil {
+		return nil, errors.New("private key cannot be nil")
+	}
+	k := priv.Size()
+	if len(data) > k-11 {
+		return nil, fmt.Errorf("data too large for RSA key size: %d > %d", len(data), k-11)
+	}
+
+	em := make([]byte, k)
+	em[0] = 0x00
+	em[1] = 0x01
+	for i := 2; i < k-len(data)-1; i++ {
+		em[i] = 0xFF
+	}
+	em[k-len(data)-1] = 0x00
+	copy(em[k-len(data):], data)
+
+	m := new(big.Int).SetBytes(em)
+	c := new(big.Int).Exp(m, priv.D, priv.N)
+
+	out := make([]byte, k)
+	cBytes := c.Bytes()
+	copy(out[k-len(cBytes):], cBytes)
+	return out, nil
+}
+
+// EncryptServerEnvelope mengenkripsi respons server menggunakan RSA Private Key + AES-256-GCM
+// Wire format: [ 256B RSA-Priv-Encrypted AES Key ] + [ 12B IV ] + [ Ciphertext + 16B Tag ]
+// Frontend dapat mendekripsinya secara deterministik menggunakan .env:L4 (EXPO_PUBLIC_SERVER_RSA_PUBLIC_KEY)
+func EncryptServerEnvelope(privKey *rsa.PrivateKey, plaintext []byte) ([]byte, error) {
+	if privKey == nil {
+		return nil, errors.New("server private key cannot be nil")
+	}
+
+	sessionKey := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, sessionKey); err != nil {
+		return nil, fmt.Errorf("failed to generate random session key: %w", err)
+	}
+
+	encKey, err := PrivateEncrypt(privKey, sessionKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encrypt session key with private key: %w", err)
+	}
+
+	iv := make([]byte, GCMNonceLength)
+	if _, err := io.ReadFull(rand.Reader, iv); err != nil {
+		return nil, fmt.Errorf("failed to generate IV: %w", err)
+	}
+
+	block, err := aes.NewCipher(sessionKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create AES cipher: %w", err)
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create GCM block: %w", err)
+	}
+
+	ciphertextWithTag := gcm.Seal(nil, iv, plaintext, nil)
+
+	payload := make([]byte, 0, len(encKey)+len(iv)+len(ciphertextWithTag))
+	payload = append(payload, encKey...)
+	payload = append(payload, iv...)
+	payload = append(payload, ciphertextWithTag...)
+
+	return payload, nil
 }

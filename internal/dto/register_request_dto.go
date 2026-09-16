@@ -7,6 +7,7 @@ type EncryptedRegisterCustomerRequest struct {
 	Email       []byte `json:"email" validate:"required"`       // Encrypted Binary BYTEA Bytes
 	PhoneNumber []byte `json:"phone_number" validate:"required"`// Encrypted Binary BYTEA Bytes
 	Address     []byte `json:"address" validate:"required"`     // Encrypted Binary BYTEA Bytes
+	Password    string `json:"password,omitempty"`
 }
 
 // PlaintextRegisterCustomer internal struct setelah didekripsi

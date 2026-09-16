@@ -22,7 +22,7 @@ type VerificationClaims struct {
 // GenerateVerificationToken creates a 1-minute JWT containing customer_id and verification_id
 func GenerateVerificationToken(customerID, verificationID, secretKey string, duration time.Duration) (string, error) {
 	if duration <= 0 {
-		duration = 1 * time.Minute
+		duration = 5 * time.Minute
 	}
 	if secretKey == "" {
 		secretKey = "neocentra_default_verification_jwt_secret_key"
@@ -75,4 +75,34 @@ func ParseVerificationToken(tokenString, secretKey string) (*VerificationClaims,
 	}
 
 	return nil, ErrInvalidVerificationToken
+}
+
+// GenerateAccessToken creates a short-lived access JWT (e.g. 15 minutes)
+func GenerateAccessToken(customerID, role, secretKey string, duration time.Duration) (string, error) {
+	if duration <= 0 {
+		duration = 15 * time.Minute
+	}
+	if secretKey == "" {
+		secretKey = "super_secret_jwt_key_hs256_neocentra_bank_2026"
+	}
+	if role == "" {
+		role = "customer"
+	}
+
+	claims := jwt.MapClaims{
+		"user_id": customerID,
+		"sub":     customerID,
+		"role":    role,
+		"exp":     time.Now().Add(duration).Unix(),
+		"iat":     time.Now().Unix(),
+		"iss":     "neocentra-bank",
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	tokenString, err := token.SignedString([]byte(secretKey))
+	if err != nil {
+		return "", fmt.Errorf("gagal menandatangani access token: %w", err)
+	}
+
+	return tokenString, nil
 }

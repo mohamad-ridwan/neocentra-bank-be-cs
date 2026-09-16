@@ -60,6 +60,20 @@ func (m *MockCustomerRepository) UpdateCustomerStatus(ctx context.Context, custo
 	return nil
 }
 
+func (m *MockCustomerRepository) FindCustomerByIdentifier(ctx context.Context, identifier string) (*domain.Customer, *usecase.DecryptedCustomerPII, error) {
+	for _, c := range m.customers {
+		return c, &usecase.DecryptedCustomerPII{
+			CustomerID:  c.CustomerID,
+			NIK:         "3271012345670001",
+			FullName:    "Budi Santoso",
+			Email:       "budi@gmail.com",
+			PhoneNumber: "+6281234567890",
+			Status:      string(c.Status),
+		}, nil
+	}
+	return nil, nil, domain.ErrCustomerNotFound
+}
+
 type MockVerificationRepository struct {
 	verifications map[string]*domain.Verification
 }
@@ -143,6 +157,7 @@ func TestCustomerUseCase_RegisterNewCustomer(t *testing.T) {
 		Email:       emailEnc,
 		PhoneNumber: phoneEnc,
 		Address:     addressEnc,
+		Password:    "SecurePassword123#",
 	}
 
 	ctx := context.Background()

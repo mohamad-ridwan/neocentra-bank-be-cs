@@ -73,9 +73,11 @@ func main() {
 	// 5. Initialize Repositories, Services, WorkerPool & Transit Decryptor
 	var custRepo usecase.CustomerRepository
 	var verificationRepo usecase.VerificationRepository
+	var accountRepo usecase.AccountRepository
 	if dbPool != nil {
 		custRepo = postgres.NewCustomerRepository(dbPool, kmsService)
 		verificationRepo = postgres.NewVerificationRepository(dbPool)
+		accountRepo = postgres.NewAccountRepository(dbPool)
 	}
 
 	mailService := service.NewMailService()
@@ -113,8 +115,10 @@ func main() {
 		transitDecryptor,
 	)
 
+	accountUseCase := usecase.NewAccountUseCase(accountRepo, transitDecryptor)
+
 	// 6. Initialize Delivery Layer (Handler & Router)
-	custHandler := handler.NewCustomerHandler(custUseCase)
+	custHandler := handler.NewCustomerHandler(custUseCase, accountUseCase)
 	router := deliveryHttp.SetupRouter(custHandler, redisClient)
 
 	// 7. Start HTTP Server
