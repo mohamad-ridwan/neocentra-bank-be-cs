@@ -1,10 +1,14 @@
 package handler
 
 import (
+	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
+	"strings"
 
 	"customer-service/internal/dto"
+	"customer-service/internal/security"
 	"customer-service/internal/usecase"
 	"customer-service/internal/util"
 
@@ -44,13 +48,55 @@ func (h *AccountHandler) OpenAccount(c *gin.Context) {
 	}
 
 	var req dto.OpenAccountRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"success": false,
-			"code":    http.StatusBadRequest,
-			"message": "Format request pembukaan rekening tidak valid: " + err.Error(),
-		})
-		return
+	contentType := c.GetHeader("Content-Type")
+
+	if strings.Contains(contentType, "application/octet-stream") {
+		bodyBytes, err := io.ReadAll(c.Request.Body)
+		if err != nil || len(bodyBytes) == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"success": false,
+				"code":    http.StatusBadRequest,
+				"message": "Gagal membaca binary request body",
+			})
+			return
+		}
+
+		if len(bodyBytes) < security.MinTransitPayloadSize {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"success": false,
+				"code":    http.StatusBadRequest,
+				"message": "Ukuran binary payload transit tidak valid",
+			})
+			return
+		}
+
+		decryptedPayload, err := h.accountUseCase.DecryptTransitPayload(bodyBytes)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"success": false,
+				"code":    http.StatusBadRequest,
+				"message": "Dekripsi payload gagal. Kredensial kriptografi tidak sesuai.",
+			})
+			return
+		}
+
+		if err := json.Unmarshal(decryptedPayload, &req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"success": false,
+				"code":    http.StatusBadRequest,
+				"message": "Format JSON hasil dekripsi tidak valid: " + err.Error(),
+			})
+			return
+		}
+	} else {
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"success": false,
+				"code":    http.StatusBadRequest,
+				"message": "Format request pembukaan rekening tidak valid: " + err.Error(),
+			})
+			return
+		}
 	}
 
 	data, session, err := h.accountUseCase.OpenAccount(c.Request.Context(), customerID, req)
@@ -81,13 +127,28 @@ func (h *AccountHandler) OpenAccount(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusCreated, gin.H{
+	respMap := gin.H{
 		"success": true,
 		"code":    http.StatusCreated,
 		"message": "Rekening Neocentra berhasil dibuka",
 		"data":    data,
 		"session": session,
-	})
+	}
+
+	// Jika client meminta biner application/octet-stream atau mengirim application/octet-stream, kirim response terenkripsi
+	acceptHeader := c.GetHeader("Accept")
+	if strings.Contains(contentType, "application/octet-stream") || strings.Contains(acceptHeader, "application/octet-stream") {
+		jsonBytes, err := json.Marshal(respMap)
+		if err == nil {
+			encryptedResp, encErr := h.accountUseCase.EncryptServerEnvelope(jsonBytes)
+			if encErr == nil {
+				c.Data(http.StatusCreated, "application/octet-stream", encryptedResp)
+				return
+			}
+		}
+	}
+
+	c.JSON(http.StatusCreated, respMap)
 }
 
 // VerifyPIN memverifikasi keabsahan PIN 6 digit sebelum transaksi finansial

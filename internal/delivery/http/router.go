@@ -53,7 +53,12 @@ func SetupRouter(custHandler *handler.CustomerHandler, rdb *redis.Client, accHan
 
 		// 2. PROTECTED ROUTES (Wajib User JWT Terverifikasi)
 		protected := v1.Group("")
-		protected.Use(middleware.JWTAuthMiddleware())
+		protected.Use(
+			middleware.AntiReplayMiddleware(rdb, 60*time.Second),
+			middleware.RequestSignatureMiddleware(),
+			middleware.IdempotencyMiddleware(rdb, 10*time.Minute),
+			middleware.JWTAuthMiddleware(),
+		)
 		{
 			if accHandler != nil {
 				// Pembukaan rekening baru (ROLE_CUSTOMER_BASIC)

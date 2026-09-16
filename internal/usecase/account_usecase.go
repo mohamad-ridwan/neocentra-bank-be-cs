@@ -287,7 +287,22 @@ func (u *AccountUseCase) GetAccountsEncrypted(ctx context.Context, customerID st
 	return security.EncryptServerEnvelope(u.transitDecryptor.GetPrivateKey(), respJSON)
 }
 
+func (u *AccountUseCase) DecryptTransitPayload(cipher []byte) ([]byte, error) {
+	if u.transitDecryptor == nil {
+		return nil, errors.New("transit decryptor belum dikonfigurasi")
+	}
+	return u.transitDecryptor.DecryptRawTransitPayload(cipher)
+}
+
+func (u *AccountUseCase) EncryptServerEnvelope(plaintext []byte) ([]byte, error) {
+	if u.transitDecryptor == nil || u.transitDecryptor.GetPrivateKey() == nil {
+		return nil, errors.New("transit encryptor server private key belum dikonfigurasi")
+	}
+	return security.EncryptServerEnvelope(u.transitDecryptor.GetPrivateKey(), plaintext)
+}
+
 type ginHAccounts struct {
 	Success bool             `json:"success"`
 	Data    []domain.Account `json:"data"`
 }
+

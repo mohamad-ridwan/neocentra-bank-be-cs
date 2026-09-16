@@ -13,6 +13,7 @@ import (
 	"customer-service/internal/delivery/http/middleware"
 	"customer-service/internal/domain"
 	"customer-service/internal/dto"
+	"customer-service/internal/security"
 	"customer-service/internal/usecase"
 	"customer-service/internal/util"
 
@@ -208,3 +209,78 @@ func TestAccountHandler_VerifyPIN_Success(t *testing.T) {
 		t.Fatalf("expected status 200 OK, got %d. Body: %s", w.Code, w.Body.String())
 	}
 }
+
+func TestAccountHandler_OpenAccount_Encrypted_Success(t *testing.T) {
+	privKey, pubKey, err := security.GenerateRSAKeyPair(2048)
+	if err != nil {
+		t.Fatalf("failed to generate key pair: %v", err)
+	}
+	transitDec := security.NewTransitDecryptor(privKey)
+
+	repo := &mockAccountRepoForHandler{
+		accounts:    make(map[string]*domain.Account),
+		activeMap:   make(map[string]bool),
+		attemptsMap: make(map[string]int),
+	}
+	uc := usecase.NewAccountUseCase(repo, transitDec)
+	uc.SetJWTSecret("test-secret-key")
+	h := handler.NewAccountHandler(uc)
+	r := setupTestAccountRouter(h, "test-secret-key")
+
+	reqBody := dto.OpenAccountRequest{
+		ProductType: "REGULAR_SAVINGS",
+		BranchCode:  "001",
+		PIN:         "928374",
+		EmploymentData: &dto.EmploymentDataDTO{
+			Occupation:    "Engineer",
+			MonthlyIncome: "15000000",
+			SourceOfFunds: "Salary",
+		},
+	}
+	jsonBytes, _ := json.Marshal(reqBody)
+
+	// Encrypt payload menggunakan RSA Public Key server
+	encryptedPayload, err := security.EncryptRawTransitPayload(pubKey, jsonBytes)
+	if err != nil {
+		t.Fatalf("failed to encrypt transit payload: %v", err)
+	}
+
+	req, _ := http.NewRequest(http.MethodPost, "/api/v1/accounts/open", bytes.NewReader(encryptedPayload))
+	req.Header.Set("Authorization", "Bearer test-jwt")
+	req.Header.Set("X-Test-Role", "ROLE_CUSTOMER_BASIC")
+	req.Header.Set("Content-Type", "application/octet-stream")
+	req.Header.Set("Accept", "application/octet-stream")
+
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected status 201 Created, got %d. Body: %s", w.Code, w.Body.String())
+	}
+
+	if w.Header().Get("Content-Type") != "application/octet-stream" {
+		t.Fatalf("expected Content-Type application/octet-stream, got %s", w.Header().Get("Content-Type"))
+	}
+
+	// Verifikasi response biner dapat didekripsi dengan public key
+	decryptedBytes, err := security.DecryptServerEnvelope(pubKey, w.Body.Bytes())
+	if err != nil {
+		t.Fatalf("failed to decrypt server envelope response: %v", err)
+	}
+
+	var resp map[string]interface{}
+	if err := json.Unmarshal(decryptedBytes, &resp); err != nil {
+		t.Fatalf("failed to parse decrypted JSON: %v", err)
+	}
+
+	if resp["success"] != true {
+		t.Fatalf("expected success true, got %v", resp["success"])
+	}
+
+	data := resp["data"].(map[string]interface{})
+	accNum := data["account_number"].(string)
+	if len(accNum) != 12 || !util.ValidateLuhn(accNum) {
+		t.Fatalf("invalid generated account number in decrypted payload: %s", accNum)
+	}
+}
+

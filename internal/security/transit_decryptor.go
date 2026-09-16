@@ -298,3 +298,73 @@ func EncryptServerEnvelope(privKey *rsa.PrivateKey, plaintext []byte) ([]byte, e
 
 	return payload, nil
 }
+
+// PublicDecrypt melakukan dekripsi data menggunakan RSA Public Key (kebalikan dari PrivateEncrypt PKCS#1 v1.5)
+func PublicDecrypt(pub *rsa.PublicKey, data []byte) ([]byte, error) {
+	if pub == nil {
+		return nil, errors.New("public key cannot be nil")
+	}
+	k := pub.Size()
+	if len(data) != k {
+		return nil, fmt.Errorf("data length must match key size: %d != %d", len(data), k)
+	}
+
+	c := new(big.Int).SetBytes(data)
+	e := big.NewInt(int64(pub.E))
+	m := new(big.Int).Exp(c, e, pub.N)
+
+	em := make([]byte, k)
+	mBytes := m.Bytes()
+	copy(em[k-len(mBytes):], mBytes)
+
+	// Validasi padding PKCS#1 v1.5 (block type 1: 0x00 0x01 [0xFF...] 0x00 [data])
+	if em[0] != 0x00 || em[1] != 0x01 {
+		return nil, errors.New("invalid PKCS#1 padding block type")
+	}
+
+	sepIndex := -1
+	for i := 2; i < k; i++ {
+		if em[i] == 0x00 {
+			sepIndex = i
+			break
+		}
+	}
+
+	if sepIndex == -1 || sepIndex >= k-1 {
+		return nil, errors.New("separator 0x00 not found in PKCS#1 padding")
+	}
+
+	return em[sepIndex+1:], nil
+}
+
+// DecryptServerEnvelope mendekripsi server envelope biner menggunakan RSA Public Key
+func DecryptServerEnvelope(pubKey *rsa.PublicKey, body []byte) ([]byte, error) {
+	if len(body) < MinTransitPayloadSize {
+		return nil, fmt.Errorf("server envelope payload too short: got %d bytes, minimum required %d bytes", len(body), MinTransitPayloadSize)
+	}
+
+	encKey := body[:RSAEncryptedKeyLength]
+	iv := body[RSAEncryptedKeyLength : RSAEncryptedKeyLength+GCMNonceLength]
+	ciphertextWithTag := body[RSAEncryptedKeyLength+GCMNonceLength:]
+
+	sessionKey, err := PublicDecrypt(pubKey, encKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decrypt session key via RSA public key: %w", err)
+	}
+
+	if len(sessionKey) != 32 {
+		return nil, fmt.Errorf("invalid decrypted session key length: %d", len(sessionKey))
+	}
+
+	block, err := aes.NewCipher(sessionKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create AES cipher: %w", err)
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create GCM block: %w", err)
+	}
+
+	return gcm.Open(nil, iv, ciphertextWithTag, nil)
+}
