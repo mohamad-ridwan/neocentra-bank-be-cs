@@ -12,11 +12,12 @@ CREATE TYPE transaction_type_enum AS ENUM ('INTERBANK_OUT', 'INTERBANK_IN');
 -- ============================================================================
 CREATE TABLE customers (
     customer_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    nik VARCHAR(16) UNIQUE NOT NULL,
-    full_name VARCHAR(100) NOT NULL,
-    email VARCHAR(100) UNIQUE NOT NULL,
-    phone_number VARCHAR(20) UNIQUE NOT NULL,
-    address TEXT NOT NULL,
+    nik BYTEA UNIQUE NOT NULL,
+    full_name BYTEA NOT NULL,
+    email BYTEA UNIQUE NOT NULL,
+    phone_number BYTEA UNIQUE NOT NULL,
+    address BYTEA NOT NULL,
+    password_hash VARCHAR(255) NOT NULL DEFAULT '',
     status customer_status_enum NOT NULL DEFAULT 'PENDING_VERIFICATION',
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
@@ -88,3 +89,17 @@ CREATE INDEX idx_accounts_account_number ON accounts(account_number);
 CREATE INDEX idx_transactions_source_acc ON transactions(source_account_id);
 CREATE INDEX idx_transactions_ref_num ON transactions(reference_number);
 CREATE INDEX idx_kyc_customer_status ON kyc_verifications(customer_id, status);
+-- ============================================================================
+-- 8. TABEL VERIFICATIONS (Penyimpanan Kode Verifikasi Multi-Purpose)
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS verifications (
+    verification_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    customer_id UUID NOT NULL REFERENCES customers(customer_id) ON DELETE CASCADE,
+    verification_type VARCHAR(50) NOT NULL DEFAULT 'EMAIL_REGISTRATION',
+    code INT NOT NULL CHECK (code >= 10000 AND code <= 99999),
+    expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_verifications_lookup ON verifications(verification_id, customer_id, code);
+CREATE INDEX IF NOT EXISTS idx_verifications_expires_at ON verifications(expires_at);

@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/base64"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -56,9 +56,14 @@ func (s *LocalKMSService) loadOrCreateKeyset(ctx context.Context, keyName string
 		return fmt.Errorf("failed to create master AEAD primitive: %w", err)
 	}
 
-	encryptedKeyset, version, err := s.repo.GetKeysetByName(ctx, keyName)
-	if err != nil || len(encryptedKeyset) == 0 {
-		// Keyset belum ada, buat keyset baru
+	var encryptedKeyset []byte
+	var version int
+	if s.repo != nil {
+		encryptedKeyset, version, err = s.repo.GetKeysetByName(ctx, keyName)
+	}
+
+	if s.repo == nil || err != nil || len(encryptedKeyset) == 0 {
+		// Keyset belum ada di DB atau repo nil, buat keyset baru
 		kh, err := keyset.NewHandle(aead.AES256GCMKeyTemplate())
 		if err != nil {
 			return fmt.Errorf("failed to create new keyset handle: %w", err)
@@ -71,8 +76,10 @@ func (s *LocalKMSService) loadOrCreateKeyset(ctx context.Context, keyName string
 		}
 
 		primaryKeyID := kh.KeysetInfo().GetPrimaryKeyId()
-		if err := s.repo.SaveKeyset(ctx, keyName, buf.Bytes(), primaryKeyID, 1); err != nil {
-			return fmt.Errorf("failed to save keyset to repository: %w", err)
+		if s.repo != nil {
+			if err := s.repo.SaveKeyset(ctx, keyName, buf.Bytes(), primaryKeyID, 1); err != nil {
+				return fmt.Errorf("failed to save keyset to repository: %w", err)
+			}
 		}
 
 		primitive, err := aead.New(kh)
@@ -108,33 +115,36 @@ func (s *LocalKMSService) loadOrCreateKeyset(ctx context.Context, keyName string
 	return nil
 }
 
-// EncryptPII mengenkripsi plaintext (misal NIK) dengan AAD (Associated Authenticated Data)
-func (s *LocalKMSService) EncryptPII(plaintext string, aad string) (string, error) {
+// EncryptPII mengenkripsi plaintext ke biner []byte murni menggunakan Google Tink Keyset dari PostgreSQL (kms_keysets)
+func (s *LocalKMSService) EncryptPII(plaintext string, aad string) ([]byte, error) {
 	s.mu.RLock()
 	aeadPrimitive := s.aead
 	s.mu.RUnlock()
+
+	if aeadPrimitive == nil {
+		return nil, errors.New("kms aead primitive is not initialized")
+	}
 
 	ciphertext, err := aeadPrimitive.Encrypt([]byte(plaintext), []byte(aad))
 	if err != nil {
-		return "", fmt.Errorf("failed to encrypt PII: %w", err)
+		return nil, fmt.Errorf("failed to encrypt PII with database keyset: %w", err)
 	}
-	return base64.StdEncoding.EncodeToString(ciphertext), nil
+	return ciphertext, nil
 }
 
-// DecryptPII mendekripsi ciphertext PII (Tink otomatis mendeteksi Key ID mana yang dipakai)
-func (s *LocalKMSService) DecryptPII(ciphertextBase64 string, aad string) (string, error) {
-	ciphertext, err := base64.StdEncoding.DecodeString(ciphertextBase64)
-	if err != nil {
-		return "", fmt.Errorf("invalid base64 ciphertext: %w", err)
-	}
-
+// DecryptPII mendekripsi raw biner ciphertext []byte (BYTEA) dari PostgreSQL menggunakan Google Tink Keyset
+func (s *LocalKMSService) DecryptPII(ciphertext []byte, aad string) (string, error) {
 	s.mu.RLock()
 	aeadPrimitive := s.aead
 	s.mu.RUnlock()
 
+	if aeadPrimitive == nil {
+		return "", errors.New("kms aead primitive is not initialized")
+	}
+
 	plaintext, err := aeadPrimitive.Decrypt(ciphertext, []byte(aad))
 	if err != nil {
-		return "", fmt.Errorf("failed to decrypt PII: %w", err)
+		return "", fmt.Errorf("failed to decrypt PII with database keyset: %w", err)
 	}
 	return string(plaintext), nil
 }
@@ -174,8 +184,10 @@ func (s *LocalKMSService) RotateKey(ctx context.Context, keyName string) error {
 
 	primaryKeyID := kh.KeysetInfo().GetPrimaryKeyId()
 	newVersion := currentVersion + 1
-	if err := s.repo.UpdateKeyset(ctx, keyName, buf.Bytes(), primaryKeyID, newVersion); err != nil {
-		return fmt.Errorf("failed to update rotated keyset in repository: %w", err)
+	if s.repo != nil {
+		if err := s.repo.UpdateKeyset(ctx, keyName, buf.Bytes(), primaryKeyID, newVersion); err != nil {
+			return fmt.Errorf("failed to update rotated keyset in repository: %w", err)
+		}
 	}
 
 	primitive, err := aead.New(kh)
