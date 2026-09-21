@@ -45,7 +45,7 @@ func SetupRouter(custHandler *handler.CustomerHandler, rdb *redis.Client, accHan
 			public.POST("/customers/register", custHandler.RegisterCustomer)
 			public.POST("/customers/login", custHandler.LoginCustomer)
 			public.POST("/accounts", custHandler.GetAccounts)
-			public.GET("/accounts", custHandler.GetAccounts)
+			// public.GET("/accounts", custHandler.GetAccounts)
 		}
 
 		// Public Verification Endpoint (Direct JSON payload { verificationToken, code })
